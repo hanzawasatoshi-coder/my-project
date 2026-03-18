@@ -843,7 +843,26 @@ try {
             Write-Host "    DISM /Online /Cleanup-Image /RestoreHealth" -ForegroundColor White
         }
 
-        # 対処2: フレームワークパッケージの再登録
+        # 対処2: Windows 8 互換モードの設定 (CoreMessaging.dll クラッシュの最も効果的な回避策)
+        Write-Host "  Windows 8 互換モードを設定しています..." -ForegroundColor Gray
+        $compatRegPath = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
+        if (-not (Test-Path $compatRegPath)) {
+            New-Item -Path $compatRegPath -Force | Out-Null
+        }
+        if ($installType -eq "msix" -and $msixPackage) {
+            $claudeExePath = Join-Path $msixPackage.InstallLocation "Claude.exe"
+            if (Test-Path $claudeExePath) {
+                Set-ItemProperty -Path $compatRegPath -Name $claudeExePath -Value "~ WIN8RTM" -ErrorAction SilentlyContinue
+                Write-Host "  互換モード設定完了: $claudeExePath → Windows 8" -ForegroundColor Green
+                $repairsPerformed += "Windows 8 互換モード設定 (CoreMessaging.dll 回避)"
+            }
+        } elseif ($claudeExe) {
+            Set-ItemProperty -Path $compatRegPath -Name $claudeExe -Value "~ WIN8RTM" -ErrorAction SilentlyContinue
+            Write-Host "  互換モード設定完了: $claudeExe → Windows 8" -ForegroundColor Green
+            $repairsPerformed += "Windows 8 互換モード設定 (CoreMessaging.dll 回避)"
+        }
+
+        # 対処4: フレームワークパッケージの再登録
         Write-Host "  フレームワークパッケージを再登録しています..." -ForegroundColor Gray
         Get-AppxPackage -AllUsers "*Framework*" -ErrorAction SilentlyContinue | ForEach-Object {
             $manifestPath = Join-Path $_.InstallLocation "AppxManifest.xml"
@@ -853,7 +872,7 @@ try {
         }
         Write-Host "  フレームワーク再登録完了" -ForegroundColor Green
 
-        # 対処3: Windows App Runtime の最新バージョン確認
+        # 対処5: Windows App Runtime の最新バージョン確認
         $latestRuntime = Get-AppxPackage "*WindowsAppRuntime*" -ErrorAction SilentlyContinue |
             Sort-Object -Property Version -Descending | Select-Object -First 1
         if ($latestRuntime) {
