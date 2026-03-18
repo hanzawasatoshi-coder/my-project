@@ -2,98 +2,149 @@
 chcp 65001 >nul 2>&1
 echo ============================================
 echo  Claude Desktop 起動エラー修正ツール
+echo  対象: "Claude Desktop failed to Launch"
 echo ============================================
 echo.
 
-REM Step 1: Claude Desktopプロセスを終了
-echo [Step 1] Claude Desktopプロセスを終了しています...
+set CONFIG_DIR=%APPDATA%\Claude
+set CONFIG_FILE=%CONFIG_DIR%\claude_desktop_config.json
+set LOCAL_APP=%LOCALAPPDATA%
+
+REM ============================================================
+REM Step 1: Claude関連プロセスの完全終了
+REM ============================================================
+echo [Step 1/7] Claude関連プロセスを完全終了...
 taskkill /f /im "Claude.exe" >nul 2>&1
 taskkill /f /im "claude.exe" >nul 2>&1
-timeout /t 2 /nobreak >nul
+timeout /t 3 /nobreak >nul
 echo   完了
 echo.
 
-REM Step 2: 設定ファイルの確認
-set CONFIG_DIR=%APPDATA%\Claude
-set CONFIG_FILE=%CONFIG_DIR%\claude_desktop_config.json
+REM ============================================================
+REM Step 2: インストール状態の確認
+REM ============================================================
+echo [Step 2/7] インストール状態を確認...
+set CLAUDE_EXE=
+if exist "%LOCAL_APP%\Programs\claude\Claude.exe" (
+    set "CLAUDE_EXE=%LOCAL_APP%\Programs\claude\Claude.exe"
+)
+if exist "%LOCAL_APP%\Programs\Claude\Claude.exe" (
+    set "CLAUDE_EXE=%LOCAL_APP%\Programs\Claude\Claude.exe"
+)
+if defined CLAUDE_EXE (
+    echo   実行ファイル: %CLAUDE_EXE%
+) else (
+    echo   [警告] Claude Desktopの実行ファイルが見つかりません
+    echo   再インストールが必要です: https://claude.ai/download
+)
+echo.
 
-echo [Step 2] 設定ファイルを確認しています...
-echo   設定ファイルのパス: %CONFIG_FILE%
+REM ============================================================
+REM Step 3: Visual C++ ランタイムの確認
+REM ============================================================
+echo [Step 3/7] Visual C++ ランタイムを確認...
+if exist "%SystemRoot%\System32\vcruntime140.dll" (
+    echo   vcruntime140.dll: OK
+) else (
+    echo   [問題] Visual C++ Redistributable が見つかりません
+    echo   ダウンロード: https://aka.ms/vs/17/release/vc_redist.x64.exe
+)
+echo.
+
+REM ============================================================
+REM Step 4: 設定ファイルのバックアップ
+REM ============================================================
+echo [Step 4/7] 設定ファイルをバックアップ...
+if exist "%CONFIG_FILE%" (
+    copy "%CONFIG_FILE%" "%CONFIG_FILE%.backup.%date:~0,4%%date:~5,2%%date:~8,2%" >nul 2>&1
+    echo   バックアップ完了
+) else (
+    echo   設定ファイルなし。スキップ。
+)
+echo.
+
+REM ============================================================
+REM Step 5: ユーザーデータの完全リセット
+REM ============================================================
+echo [Step 5/7] ユーザーデータをリセット (設定ファイルは保持)...
+
+for %%d in (Cache "Code Cache" GPUCache DawnCache DawnWebGPUCache blob_storage "Session Storage" "Local Storage" IndexedDB "Service Worker" Network databases CachedData Crashpad logs tmp) do (
+    if exist "%CONFIG_DIR%\%%~d" (
+        rmdir /s /q "%CONFIG_DIR%\%%~d" >nul 2>&1
+        echo   削除: %%~d/
+    )
+)
+
+for %%f in (Cookies Cookies-journal Preferences "Local State" "Network Persistent State" TransportSecurity "Visited Links" "Web Data" "Web Data-journal" window-state.json) do (
+    if exist "%CONFIG_DIR%\%%~f" (
+        del /f /q "%CONFIG_DIR%\%%~f" >nul 2>&1
+        echo   削除: %%~f
+    )
+)
+
+echo   リセット完了
+echo.
+
+REM ============================================================
+REM Step 6: 設定ファイルの検証・修復
+REM ============================================================
+echo [Step 6/7] 設定ファイルを検証...
+if not exist "%CONFIG_DIR%" mkdir "%CONFIG_DIR%"
 
 if not exist "%CONFIG_FILE%" (
-    echo   設定ファイルが見つかりません。新規作成します...
-    if not exist "%CONFIG_DIR%" mkdir "%CONFIG_DIR%"
     echo {} > "%CONFIG_FILE%"
-    echo   空の設定ファイルを作成しました。
-    goto :step3
-)
-
-REM 設定ファイルのバックアップ
-echo   設定ファイルをバックアップしています...
-copy "%CONFIG_FILE%" "%CONFIG_FILE%.backup.%date:~0,4%%date:~5,2%%date:~8,2%" >nul 2>&1
-echo   バックアップ完了: %CONFIG_FILE%.backup.%date:~0,4%%date:~5,2%%date:~8,2%
-
-REM JSONの簡易検証
-findstr /c:"{" "%CONFIG_FILE%" >nul 2>&1
-if errorlevel 1 (
-    echo   [問題検出] 設定ファイルが破損しています。リセットします...
-    echo {} > "%CONFIG_FILE%"
-    echo   設定ファイルをリセットしました。
-)
-echo.
-
-:step3
-REM Step 3: キャッシュとGPU関連の修正
-echo [Step 3] キャッシュをクリアしています...
-
-set CACHE_DIRS="%APPDATA%\Claude\Cache" "%APPDATA%\Claude\Code Cache" "%APPDATA%\Claude\GPUCache"
-
-for %%d in (%CACHE_DIRS%) do (
-    if exist %%d (
-        rmdir /s /q %%d >nul 2>&1
-        echo   削除: %%d
+    echo   空の設定ファイルを作成
+) else (
+    findstr /c:"{" "%CONFIG_FILE%" >nul 2>&1
+    if errorlevel 1 (
+        echo   [問題] 設定ファイルが破損。リセットします...
+        echo {} > "%CONFIG_FILE%"
+        echo   リセット完了
+    ) else (
+        echo   設定ファイル: OK
     )
 )
-echo   キャッシュクリア完了
 echo.
 
-REM Step 4: ログファイルの確認
-echo [Step 4] ログファイルを確認しています...
-set LOG_DIR=%APPDATA%\Claude\logs
-if exist "%LOG_DIR%" (
-    echo   ログディレクトリ: %LOG_DIR%
-    dir /b /o-d "%LOG_DIR%\*.log" 2>nul | findstr /n "^" | findstr "^[1-3]:"
-    echo.
-    echo   最新のログファイルの末尾を表示:
-    for /f "delims=" %%f in ('dir /b /o-d "%LOG_DIR%\*.log" 2^>nul') do (
-        echo   --- %LOG_DIR%\%%f ---
-        type "%LOG_DIR%\%%f" 2>nul | more +0
-        goto :after_log
+REM ============================================================
+REM Step 7: 修復後の起動テスト
+REM ============================================================
+echo [Step 7/7] 修復後の起動テスト...
+if defined CLAUDE_EXE (
+    echo   --disable-gpu オプションで起動しています...
+    start "" "%CLAUDE_EXE%" --disable-gpu
+    timeout /t 8 /nobreak >nul
+    tasklist /fi "imagename eq Claude.exe" 2>nul | find "Claude.exe" >nul
+    if not errorlevel 1 (
+        echo   プロセスの起動を確認しました
+    ) else (
+        echo   起動に失敗しました
     )
 ) else (
-    echo   ログディレクトリが見つかりません。
+    echo   実行ファイルが見つからないためスキップ
 )
-:after_log
 echo.
 
-REM Step 5: GPU無効化オプション
-echo [Step 5] GPUアクセラレーションの問題を確認...
-echo   GPU関連のエラーが原因の場合、以下のショートカットで起動してください:
-echo   "Claude.exe" --disable-gpu
-echo.
-
+REM ============================================================
+REM 結果サマリー
+REM ============================================================
 echo ============================================
-echo  修正完了！
+echo  修復完了！
 echo ============================================
 echo.
-echo 次のステップ:
-echo   1. Claude Desktopを再起動してください
-echo   2. まだエラーが出る場合は、以下を試してください:
-echo      a. アプリを再インストール (設定は保持されます)
-echo      b. --disable-gpu オプション付きで起動
-echo      c. %CONFIG_FILE% を確認
+echo 実行された修復:
+echo   - Claude関連プロセスの完全終了
+echo   - キャッシュ・一時ファイルの完全削除
+echo   - ユーザーデータのリセット
+echo   - 設定ファイルの検証
+echo   - --disable-gpu オプションで起動テスト
 echo.
-echo バックアップファイルの場所:
-echo   %CONFIG_FILE%.backup.*
+echo まだ起動しない場合:
+echo   1. 再インストール: https://claude.ai/download
+echo   2. 完全リセット: "%CONFIG_DIR%" フォルダを削除後に再インストール
+echo   3. Visual C++ Redistributable: https://aka.ms/vs/17/release/vc_redist.x64.exe
+echo   4. Windows Updateで最新の状態にする
+echo.
+echo バックアップ: %CONFIG_FILE%.backup.*
 echo.
 pause
