@@ -524,7 +524,7 @@ if (Test-Path $configDir) {
 
 # MSIX版のローカルキャッシュもクリア
 if ($installType -eq "msix" -and $msixPackage) {
-    $msixLocalCache = Join-Path $localAppData "Packages" $msixPackage.PackageFamilyName "LocalCache"
+    $msixLocalCache = Join-Path (Join-Path (Join-Path $localAppData "Packages") $msixPackage.PackageFamilyName) "LocalCache"
     if (Test-Path $msixLocalCache) {
         Write-Host "  MSIXローカルキャッシュをクリア: $msixLocalCache" -ForegroundColor Gray
         Get-ChildItem $msixLocalCache -Recurse -ErrorAction SilentlyContinue |
@@ -532,7 +532,7 @@ if ($installType -eq "msix" -and $msixPackage) {
         Write-Host "  MSIXキャッシュクリア完了" -ForegroundColor Green
     }
 
-    $msixTempState = Join-Path $localAppData "Packages" $msixPackage.PackageFamilyName "TempState"
+    $msixTempState = Join-Path (Join-Path (Join-Path $localAppData "Packages") $msixPackage.PackageFamilyName) "TempState"
     if (Test-Path $msixTempState) {
         Get-ChildItem $msixTempState -Recurse -ErrorAction SilentlyContinue |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -725,9 +725,9 @@ if ($installType -eq "msix") {
     Write-Host "     Remove-Item -Recurse -Force '$configDir'" -ForegroundColor Gray
     Write-Host "     その後、再インストール" -ForegroundColor Gray
 }
-Write-Host "  3. Visual C++ Redistributableをインストール:" -ForegroundColor White
+Write-Host "  4. Visual C++ Redistributableをインストール:" -ForegroundColor White
 Write-Host "     https://aka.ms/vs/17/release/vc_redist.x64.exe" -ForegroundColor Gray
-Write-Host "  4. Windows Updateを確認し、最新の状態にする" -ForegroundColor White
+Write-Host "  5. Windows Updateを確認し、最新の状態にする" -ForegroundColor White
 Write-Host ""
 Write-Host "バックアップ:" -ForegroundColor White
 Write-Host "  $configFile.backup.*" -ForegroundColor Gray
