@@ -409,6 +409,8 @@ Write-Host ""
 Write-Host "[Step 8/12] CoreMessaging.dll を確認..." -ForegroundColor Yellow
 
 $coreMsgDll = Join-Path $env:SystemRoot "System32\CoreMessaging.dll"
+$coreMsgCrashDetected = $false
+
 if (Test-Path $coreMsgDll) {
     $coreMsgInfo = (Get-Item $coreMsgDll).VersionInfo
     Write-Host "  CoreMessaging.dll: $($coreMsgInfo.FileVersion)" -ForegroundColor Green
@@ -424,6 +426,64 @@ if (Test-Path $coreMsgDll) {
     Write-Host "  [問題] CoreMessaging.dll が見つかりません" -ForegroundColor Red
     Write-Host "  DISM /Online /Cleanup-Image /RestoreHealth で修復してください" -ForegroundColor Yellow
     $issuesFound += "CoreMessaging.dll 欠落"
+}
+
+# CoreMessaging.dll での過去のクラッシュを検出 (例外コード 0xc0000602)
+try {
+    $coreMsgCrashes = Get-WinEvent -LogName Application -MaxEvents 100 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Message -match "Claude" -and
+            $_.Message -match "CoreMessaging\.dll" -and
+            $_.Message -match "0xc0000602"
+        } | Select-Object -First 1
+
+    if ($coreMsgCrashes) {
+        $coreMsgCrashDetected = $true
+        Write-Host "  [問題] CoreMessaging.dll クラッシュ (0xc0000602) を検出" -ForegroundColor Red
+        Write-Host "  STATUS_FAIL_FAST_EXCEPTION: MSIX パッケージと CoreMessaging.dll の互換性問題" -ForegroundColor Yellow
+        $issuesFound += "CoreMessaging.dll クラッシュ (0xc0000602)"
+
+        # 対処1: Windows App Runtime の確認
+        Write-Host "" -ForegroundColor Gray
+        Write-Host "  --- CoreMessaging.dll 互換性問題の自動修復 ---" -ForegroundColor Cyan
+
+        # フレームワークパッケージの再登録
+        Write-Host "  フレームワークパッケージを再登録しています..." -ForegroundColor Gray
+        Get-AppxPackage -AllUsers "*Framework*" -ErrorAction SilentlyContinue | ForEach-Object {
+            $manifestPath = Join-Path $_.InstallLocation "AppxManifest.xml"
+            if (Test-Path $manifestPath) {
+                Add-AppxPackage -Register $manifestPath -DisableDevelopmentMode -ErrorAction SilentlyContinue
+            }
+        }
+        Write-Host "  フレームワーク再登録完了" -ForegroundColor Green
+
+        # Windows App Runtime の最新バージョン確認
+        $latestRuntime = Get-AppxPackage "*WindowsAppRuntime*" -ErrorAction SilentlyContinue |
+            Sort-Object -Property Version -Descending | Select-Object -First 1
+        if ($latestRuntime) {
+            Write-Host "  Windows App Runtime: $($latestRuntime.Name) v$($latestRuntime.Version)" -ForegroundColor Green
+        } else {
+            Write-Host "  [問題] Windows App Runtime がインストールされていません" -ForegroundColor Red
+            Write-Host "  https://learn.microsoft.com/ja-jp/windows/apps/windows-app-sdk/downloads" -ForegroundColor Yellow
+            $issuesFound += "Windows App Runtime 未インストール"
+        }
+
+        # MSIX版で問題が続く場合の代替案を提示
+        Write-Host "" -ForegroundColor Gray
+        Write-Host "  この問題が解決しない場合の対処法:" -ForegroundColor Yellow
+        Write-Host "  1. Windows Updateで最新の状態に更新" -ForegroundColor White
+        Write-Host "  2. Claude MSIX を再インストール:" -ForegroundColor White
+        Write-Host "     Get-AppxPackage 'Claude' | Remove-AppxPackage" -ForegroundColor Gray
+        Write-Host "     その後 https://claude.ai/download から再インストール" -ForegroundColor Gray
+        Write-Host "  3. Windows App SDK ランタイムを最新版に更新:" -ForegroundColor White
+        Write-Host "     https://learn.microsoft.com/ja-jp/windows/apps/windows-app-sdk/downloads" -ForegroundColor Gray
+        Write-Host "  4. Windows 11 へのアップグレードを検討" -ForegroundColor White
+        Write-Host "     (Windows 11 では CoreMessaging.dll の互換性問題が解消されています)" -ForegroundColor Gray
+    } else {
+        Write-Host "  CoreMessaging.dll クラッシュ履歴なし" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  クラッシュ履歴の確認中にエラー: $_" -ForegroundColor Gray
 }
 Write-Host ""
 
