@@ -246,6 +246,23 @@ if defined OS_BUILD (
     if %OS_BUILD% LSS 17763 (
         echo   [問題] Windows 10 バージョン 1809 (ビルド 17763) 以降が必要です
         echo   Windows Updateで最新バージョンに更新してください
+    ) else if %OS_BUILD% LEQ 19044 (
+        echo.
+        echo   ============================================================
+        echo   [重大] このWindows 10はサービス終了(サポート切れ)です！
+        echo   ============================================================
+        echo.
+        echo   これがClaude Desktop起動失敗の主要原因です。
+        echo   古いCoreMessaging.dllがClaude MSIX版と互換性がありません。
+        echo.
+        echo   === 対処法 ===
+        echo   [推奨] Windows 10 を最新バージョン (22H2) に更新:
+        echo     1. 設定 → 更新とセキュリティ → Windows Update → 更新プログラムのチェック
+        echo     2. または以下からWindows 10 更新アシスタントをダウンロード:
+        echo        https://www.microsoft.com/ja-jp/software-download/windows10
+        echo   [代替] Windows 11 にアップグレード:
+        echo        https://www.microsoft.com/ja-jp/software-download/windows11
+        echo.
     ) else (
         echo   Windows バージョン: 互換性OK
     )

@@ -842,7 +842,19 @@ $osVersion = [System.Environment]::OSVersion.Version
 $osBuild = $osVersion.Build
 Write-Host "  Windows バージョン: $($osVersion.Major).$($osVersion.Minor) ビルド $osBuild" -ForegroundColor Gray
 
-# Windows 10 1809 (Build 17763) 以降が必要 (Electron/WebView2の要件)
+# Windows 10 のバージョンとサービス状態を確認
+# ビルド番号 → バージョン名のマッピング
+$win10Versions = @{
+    19045 = @{ Name = "22H2"; EOL = $false; EOLDate = "2025-10-14" }
+    19044 = @{ Name = "21H2"; EOL = $true;  EOLDate = "2024-06-11" }
+    19043 = @{ Name = "21H1"; EOL = $true;  EOLDate = "2022-12-13" }
+    19042 = @{ Name = "20H2"; EOL = $true;  EOLDate = "2023-05-09" }
+    19041 = @{ Name = "2004"; EOL = $true;  EOLDate = "2021-12-14" }
+    18363 = @{ Name = "1909"; EOL = $true;  EOLDate = "2022-05-10" }
+    18362 = @{ Name = "1903"; EOL = $true;  EOLDate = "2020-12-08" }
+    17763 = @{ Name = "1809"; EOL = $true;  EOLDate = "2021-05-11" }
+}
+
 if ($osVersion.Major -lt 10) {
     Write-Host "  [問題] Windows 10 以降が必要です" -ForegroundColor Red
     $issuesFound += "Windows バージョンが古い (Windows 10未満)"
@@ -852,7 +864,43 @@ if ($osVersion.Major -lt 10) {
     Write-Host "  Windows Updateで最新バージョンに更新してください" -ForegroundColor Yellow
     $issuesFound += "Windows ビルドが古い ($osBuild < 17763)"
 } else {
-    Write-Host "  Windows バージョン: 互換性OK" -ForegroundColor Green
+    # サービス終了チェック
+    $versionInfo = $win10Versions[$osBuild]
+    if ($versionInfo) {
+        $versionName = $versionInfo.Name
+        Write-Host "  Windows 10 バージョン: $versionName (ビルド $osBuild)" -ForegroundColor Gray
+
+        if ($versionInfo.EOL) {
+            Write-Host "" -ForegroundColor Gray
+            Write-Host "  ╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Red
+            Write-Host "  ║  [重大] このWindows 10はサービス終了(サポート切れ)です！     ║" -ForegroundColor Red
+            Write-Host "  ╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Red
+            Write-Host "  バージョン $versionName のサポート終了日: $($versionInfo.EOLDate)" -ForegroundColor Red
+            Write-Host "" -ForegroundColor Gray
+            Write-Host "  これがClaude Desktop起動失敗の主要原因です。" -ForegroundColor Yellow
+            Write-Host "  古いCoreMessaging.dllがClaude MSIX版と互換性がありません。" -ForegroundColor Yellow
+            Write-Host "" -ForegroundColor Gray
+            Write-Host "  === 対処法 (いずれかを実行) ===" -ForegroundColor Cyan
+            Write-Host "  [推奨] Windows 10 を最新バージョン (22H2) に更新:" -ForegroundColor White
+            Write-Host "    1. 設定 → 更新とセキュリティ → Windows Update → 更新プログラムのチェック" -ForegroundColor Gray
+            Write-Host "    2. または https://www.microsoft.com/ja-jp/software-download/windows10" -ForegroundColor Gray
+            Write-Host "       から「Windows 10 更新アシスタント」をダウンロードして実行" -ForegroundColor Gray
+            Write-Host "" -ForegroundColor Gray
+            Write-Host "  [代替] Windows 11 にアップグレード:" -ForegroundColor White
+            Write-Host "    https://www.microsoft.com/ja-jp/software-download/windows11" -ForegroundColor Gray
+            Write-Host "" -ForegroundColor Gray
+            $issuesFound += "Windows 10 バージョン $versionName はサービス終了 - CoreMessaging.dll互換性問題の原因"
+        } else {
+            Write-Host "  Windows バージョン: 互換性OK (サポート中)" -ForegroundColor Green
+        }
+    } else {
+        # Windows 11 またはマッピングにないビルド
+        if ($osBuild -ge 22000) {
+            Write-Host "  Windows 11 (ビルド $osBuild): 互換性OK" -ForegroundColor Green
+        } else {
+            Write-Host "  Windows 10 ビルド $osBuild: 互換性OK" -ForegroundColor Green
+        }
+    }
 }
 
 # .NET Framework の確認
