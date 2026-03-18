@@ -29,9 +29,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | 4 | 旧MSIXパッケージの競合クリーンアップ (PowerShell版のみ) |
 | 5 | 旧Squirrelインストールのクリーンアップ |
 | 6 | Visual C++ / WebView2 ランタイムの確認 |
-| 7 | ユーザーデータの完全リセット (キャッシュ・一時ファイル削除) |
-| 8 | 設定ファイル (claude_desktop_config.json) の検証・修復 / MCP設定の検証 |
-| 9 | 起動テスト (MSIX版: shell:AppsFolder経由 / 旧版: --disable-gpu) |
+| 7 | CoreMessaging.dll の存在・整合性チェック |
+| 8 | Windows バージョン互換性チェック / .NET Framework確認 |
+| 9 | ユーザーデータの完全リセット (キャッシュ・一時ファイル削除) |
+| 10 | 設定ファイル (claude_desktop_config.json) の検証・修復 / MCP設定の検証 |
+| 11 | 起動テスト (MSIX版: shell:AppsFolder経由 / 旧版: --disable-gpu) |
 
 ## よくある原因
 
@@ -43,6 +45,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | ユーザーデータの破損 | 起動直後に "failed to Launch" | スクリプトが自動リセット |
 | 設定ファイルの破損 | 起動直後にエラーダイアログ | スクリプトが自動修復 |
 | MCP設定の問題 | 起動中にハング or エラー | MCP設定を無効化して確認 |
+| CoreMessaging.dll 破損/欠落 | 起動直後にクラッシュ or エラー | `DISM /Online /Cleanup-Image /RestoreHealth` で修復 |
+| Windows バージョンが古い | インストール/起動失敗 | Windows 10 1809 (Build 17763) 以降に更新 |
 | GPUドライバの問題 | 白画面 or クラッシュ | `--disable-gpu` オプションで起動 |
 | Visual C++ 未インストール | 起動直後にクラッシュ | VC++ Redistributableをインストール |
 | インストール破損 | 各種エラー | 再インストール |

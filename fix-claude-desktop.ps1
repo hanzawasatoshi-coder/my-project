@@ -39,7 +39,7 @@ if (-not $isAdmin) {
 # ============================================================
 # Step 1: Claude関連プロセスの完全終了
 # ============================================================
-Write-Host "[Step 1/10] Claude関連プロセスを完全終了..." -ForegroundColor Yellow
+Write-Host "[Step 1/12] Claude関連プロセスを完全終了..." -ForegroundColor Yellow
 
 $claudeProcesses = @("Claude", "claude", "Claude Desktop")
 foreach ($procName in $claudeProcesses) {
@@ -58,7 +58,7 @@ Write-Host ""
 # ============================================================
 # Step 2: インストール形式の検出 (MSIX / Squirrel)
 # ============================================================
-Write-Host "[Step 2/10] インストール形式を検出..." -ForegroundColor Yellow
+Write-Host "[Step 2/12] インストール形式を検出..." -ForegroundColor Yellow
 
 $installType = "unknown"
 $claudeExe = $null
@@ -191,7 +191,7 @@ Write-Host ""
 # ============================================================
 # Step 3: CoworkVMService 競合の検出と除去
 # ============================================================
-Write-Host "[Step 3/10] CoworkVMService 競合を確認..." -ForegroundColor Yellow
+Write-Host "[Step 3/12] CoworkVMService 競合を確認..." -ForegroundColor Yellow
 
 # CoworkVMService はClaude MSIX パッケージ内の cowork-svc.exe が登録するサービス。
 # 再インストール時に旧サービスが残留すると、新パッケージのインストール/起動が失敗する。
@@ -258,7 +258,7 @@ Write-Host ""
 # ============================================================
 # Step 4: 旧MSIXパッケージの競合クリーンアップ
 # ============================================================
-Write-Host "[Step 4/10] 旧MSIXパッケージの競合を確認..." -ForegroundColor Yellow
+Write-Host "[Step 4/12] 旧MSIXパッケージの競合を確認..." -ForegroundColor Yellow
 
 try {
     $allClaudePackages = Get-AppxPackage -ErrorAction SilentlyContinue |
@@ -299,7 +299,7 @@ Write-Host ""
 # ============================================================
 # Step 5: 旧Squirrelインストールのクリーンアップ
 # ============================================================
-Write-Host "[Step 5/10] 旧Squirrelインストールのクリーンアップ..." -ForegroundColor Yellow
+Write-Host "[Step 5/12] 旧Squirrelインストールのクリーンアップ..." -ForegroundColor Yellow
 
 if ($hasSquirrel -and $installType -eq "msix") {
     Write-Host "  MSIX版がインストール済みのため、旧Squirrelインストールを削除します。" -ForegroundColor Yellow
@@ -351,7 +351,7 @@ Write-Host ""
 # ============================================================
 # Step 6: Visual C++ ランタイムの確認
 # ============================================================
-Write-Host "[Step 6/10] Visual C++ ランタイムを確認..." -ForegroundColor Yellow
+Write-Host "[Step 6/12] Visual C++ ランタイムを確認..." -ForegroundColor Yellow
 
 $vcInstalled = $false
 $vcPaths = @(
@@ -382,7 +382,7 @@ Write-Host ""
 # ============================================================
 # Step 7: WebView2 ランタイムの確認
 # ============================================================
-Write-Host "[Step 7/10] WebView2 ランタイムを確認..." -ForegroundColor Yellow
+Write-Host "[Step 7/12] WebView2 ランタイムを確認..." -ForegroundColor Yellow
 
 $webview2Installed = $false
 $webview2Paths = @(
@@ -404,9 +404,76 @@ if (-not $webview2Installed) {
 Write-Host ""
 
 # ============================================================
-# Step 8: ユーザーデータの完全リセット
+# Step 8: CoreMessaging.dll の確認
 # ============================================================
-Write-Host "[Step 8/10] ユーザーデータをリセット..." -ForegroundColor Yellow
+Write-Host "[Step 8/12] CoreMessaging.dll を確認..." -ForegroundColor Yellow
+
+$coreMsgDll = Join-Path $env:SystemRoot "System32\CoreMessaging.dll"
+if (Test-Path $coreMsgDll) {
+    $coreMsgInfo = (Get-Item $coreMsgDll).VersionInfo
+    Write-Host "  CoreMessaging.dll: $($coreMsgInfo.FileVersion)" -ForegroundColor Green
+
+    # CoreMessaging.dll が破損していないか簡易チェック (ファイルサイズ)
+    $coreMsgSize = (Get-Item $coreMsgDll).Length
+    if ($coreMsgSize -lt 100KB) {
+        Write-Host "  [問題] CoreMessaging.dll のサイズが異常に小さい ($([math]::Round($coreMsgSize / 1KB)) KB)" -ForegroundColor Red
+        Write-Host "  DISM /Online /Cleanup-Image /RestoreHealth で修復してください" -ForegroundColor Yellow
+        $issuesFound += "CoreMessaging.dll サイズ異常"
+    }
+} else {
+    Write-Host "  [問題] CoreMessaging.dll が見つかりません" -ForegroundColor Red
+    Write-Host "  DISM /Online /Cleanup-Image /RestoreHealth で修復してください" -ForegroundColor Yellow
+    $issuesFound += "CoreMessaging.dll 欠落"
+}
+Write-Host ""
+
+# ============================================================
+# Step 9: Windows バージョン互換性チェック
+# ============================================================
+Write-Host "[Step 9/12] Windows バージョン互換性を確認..." -ForegroundColor Yellow
+
+$osVersion = [System.Environment]::OSVersion.Version
+$osBuild = $osVersion.Build
+Write-Host "  Windows バージョン: $($osVersion.Major).$($osVersion.Minor) ビルド $osBuild" -ForegroundColor Gray
+
+# Windows 10 1809 (Build 17763) 以降が必要 (Electron/WebView2の要件)
+if ($osVersion.Major -lt 10) {
+    Write-Host "  [問題] Windows 10 以降が必要です" -ForegroundColor Red
+    $issuesFound += "Windows バージョンが古い (Windows 10未満)"
+} elseif ($osVersion.Major -eq 10 -and $osBuild -lt 17763) {
+    Write-Host "  [問題] Windows 10 バージョン 1809 (ビルド 17763) 以降が必要です" -ForegroundColor Red
+    Write-Host "  現在のビルド: $osBuild" -ForegroundColor Yellow
+    Write-Host "  Windows Updateで最新バージョンに更新してください" -ForegroundColor Yellow
+    $issuesFound += "Windows ビルドが古い ($osBuild < 17763)"
+} else {
+    Write-Host "  Windows バージョン: 互換性OK" -ForegroundColor Green
+}
+
+# .NET Framework の確認
+$netRegPath = "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full"
+if (Test-Path $netRegPath) {
+    $netRelease = (Get-ItemProperty $netRegPath -ErrorAction SilentlyContinue).Release
+    if ($netRelease) {
+        $netVersion = switch {
+            ($netRelease -ge 533320) { "4.8.1以降" }
+            ($netRelease -ge 528040) { "4.8" }
+            ($netRelease -ge 461808) { "4.7.2" }
+            ($netRelease -ge 461308) { "4.7.1" }
+            ($netRelease -ge 460798) { "4.7" }
+            ($netRelease -ge 394802) { "4.6.2" }
+            default { "4.6未満" }
+        }
+        Write-Host "  .NET Framework: $netVersion (Release $netRelease)" -ForegroundColor Green
+    }
+} else {
+    Write-Host "  [警告] .NET Framework 4.x が見つかりません" -ForegroundColor Yellow
+}
+Write-Host ""
+
+# ============================================================
+# Step 10: ユーザーデータの完全リセット
+# ============================================================
+Write-Host "[Step 10/12] ユーザーデータをリセット..." -ForegroundColor Yellow
 
 if (Test-Path $configDir) {
     # 設定ファイルのバックアップ
@@ -475,9 +542,9 @@ if ($installType -eq "msix" -and $msixPackage) {
 Write-Host ""
 
 # ============================================================
-# Step 9: 設定ファイルの検証・修復
+# Step 11: 設定ファイルの検証・修復
 # ============================================================
-Write-Host "[Step 9/10] 設定ファイルを検証・修復..." -ForegroundColor Yellow
+Write-Host "[Step 11/12] 設定ファイルを検証・修復..." -ForegroundColor Yellow
 
 if (-not (Test-Path $configDir)) {
     New-Item -ItemType Directory -Path $configDir -Force | Out-Null
@@ -532,9 +599,9 @@ if (-not (Test-Path $configFile)) {
 Write-Host ""
 
 # ============================================================
-# Step 10: 修復後の起動テスト
+# Step 12: 修復後の起動テスト
 # ============================================================
-Write-Host "[Step 10/10] 修復後の起動テスト..." -ForegroundColor Yellow
+Write-Host "[Step 12/12] 修復後の起動テスト..." -ForegroundColor Yellow
 
 # Windowsイベントログの確認
 try {

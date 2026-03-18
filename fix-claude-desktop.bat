@@ -15,7 +15,7 @@ set CLAUDE_EXE=
 REM ============================================================
 REM Step 1: Claude関連プロセスの完全終了
 REM ============================================================
-echo [Step 1/9] Claude関連プロセスを完全終了...
+echo [Step 1/11] Claude関連プロセスを完全終了...
 taskkill /f /im "Claude.exe" >nul 2>&1
 taskkill /f /im "claude.exe" >nul 2>&1
 timeout /t 3 /nobreak >nul
@@ -25,7 +25,7 @@ echo.
 REM ============================================================
 REM Step 2: インストール形式の検出 (MSIX / Squirrel)
 REM ============================================================
-echo [Step 2/9] インストール形式を検出...
+echo [Step 2/11] インストール形式を検出...
 
 REM MSIX版の検出
 powershell -NoProfile -Command "Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty PackageFullName" 2>nul | findstr /r "Claude" >nul 2>&1
@@ -72,7 +72,7 @@ echo.
 REM ============================================================
 REM Step 3: CoworkVMService 競合の確認
 REM ============================================================
-echo [Step 3/9] CoworkVMService 競合を確認...
+echo [Step 3/11] CoworkVMService 競合を確認...
 REM CoworkVMService はClaude MSIX内の cowork-svc.exe の残留サービス。
 REM MSIXパッケージ型サービスのため sc.exe delete では削除不可。レジストリ削除が必要。
 sc query CoworkVMService >nul 2>&1
@@ -103,7 +103,7 @@ echo.
 REM ============================================================
 REM Step 4: 旧Squirrelインストールのクリーンアップ
 REM ============================================================
-echo [Step 4/9] 旧Squirrelインストールのクリーンアップ...
+echo [Step 4/11] 旧Squirrelインストールのクリーンアップ...
 if "%INSTALL_TYPE%"=="msix" (
     if exist "%LOCAL_APP%\AnthropicClaude" (
         echo   MSIX版がインストール済みのため、旧Squirrelインストールを削除します。
@@ -129,7 +129,7 @@ echo.
 REM ============================================================
 REM Step 5: Visual C++ ランタイムの確認
 REM ============================================================
-echo [Step 5/9] Visual C++ ランタイムを確認...
+echo [Step 5/11] Visual C++ ランタイムを確認...
 if exist "%SystemRoot%\System32\vcruntime140.dll" (
     echo   vcruntime140.dll: OK
 ) else (
@@ -139,9 +139,39 @@ if exist "%SystemRoot%\System32\vcruntime140.dll" (
 echo.
 
 REM ============================================================
-REM Step 6: 設定ファイルのバックアップ
+REM Step 6: CoreMessaging.dll の確認
 REM ============================================================
-echo [Step 6/9] 設定ファイルをバックアップ...
+echo [Step 6/11] CoreMessaging.dll を確認...
+if exist "%SystemRoot%\System32\CoreMessaging.dll" (
+    echo   CoreMessaging.dll: 存在確認OK
+) else (
+    echo   [問題] CoreMessaging.dll が見つかりません
+    echo   DISM /Online /Cleanup-Image /RestoreHealth で修復してください
+)
+echo.
+
+REM ============================================================
+REM Step 7: Windows バージョン互換性チェック
+REM ============================================================
+echo [Step 7/11] Windows バージョン互換性を確認...
+for /f "tokens=2 delims==" %%a in ('wmic os get BuildNumber /value 2^>nul ^| findstr BuildNumber') do set OS_BUILD=%%a
+if defined OS_BUILD (
+    echo   Windows ビルド: %OS_BUILD%
+    if %OS_BUILD% LSS 17763 (
+        echo   [問題] Windows 10 バージョン 1809 (ビルド 17763) 以降が必要です
+        echo   Windows Updateで最新バージョンに更新してください
+    ) else (
+        echo   Windows バージョン: 互換性OK
+    )
+) else (
+    echo   ビルド番号の取得に失敗しました
+)
+echo.
+
+REM ============================================================
+REM Step 8: 設定ファイルのバックアップ
+REM ============================================================
+echo [Step 8/11] 設定ファイルをバックアップ...
 if exist "%CONFIG_FILE%" (
     copy "%CONFIG_FILE%" "%CONFIG_FILE%.backup.%date:~0,4%%date:~5,2%%date:~8,2%" >nul 2>&1
     echo   バックアップ完了
@@ -153,7 +183,7 @@ echo.
 REM ============================================================
 REM Step 7: ユーザーデータの完全リセット
 REM ============================================================
-echo [Step 7/9] ユーザーデータをリセット (設定ファイルは保持)...
+echo [Step 9/11] ユーザーデータをリセット (設定ファイルは保持)...
 
 for %%d in (Cache "Code Cache" GPUCache DawnCache DawnWebGPUCache blob_storage "Session Storage" "Local Storage" IndexedDB "Service Worker" "Shared Dictionary" WebStorage Network databases CachedData Crashpad logs tmp) do (
     if exist "%CONFIG_DIR%\%%~d" (
@@ -175,7 +205,7 @@ echo.
 REM ============================================================
 REM Step 8: 設定ファイルの検証・修復
 REM ============================================================
-echo [Step 8/9] 設定ファイルを検証...
+echo [Step 10/11] 設定ファイルを検証...
 if not exist "%CONFIG_DIR%" mkdir "%CONFIG_DIR%"
 
 if not exist "%CONFIG_FILE%" (
@@ -196,7 +226,7 @@ echo.
 REM ============================================================
 REM Step 9: 修復後の起動テスト
 REM ============================================================
-echo [Step 9/9] 修復後の起動テスト...
+echo [Step 11/11] 修復後の起動テスト...
 if "%INSTALL_TYPE%"=="msix" (
     if defined MSIX_FAMILY (
         echo   MSIX版Claude Desktopを起動しています...
