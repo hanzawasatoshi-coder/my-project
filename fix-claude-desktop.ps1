@@ -6,6 +6,7 @@
     "Claude Desktop failed to Launch" エラーを修正します。
     - プロセス完全終了
     - MSIX/Squirrel両インストール形式の検出と整合性チェック
+    - インストールログの分析と原因特定
     - CoworkVMService競合の検出と除去
     - 旧インストール残留のクリーンアップ
     - ユーザーデータの完全リセット
@@ -18,6 +19,7 @@
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Continue"
+$totalSteps = 13
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host " Claude Desktop 起動エラー修正ツール" -ForegroundColor Cyan
@@ -39,7 +41,7 @@ if (-not $isAdmin) {
 # ============================================================
 # Step 1: Claude関連プロセスの完全終了
 # ============================================================
-Write-Host "[Step 1/12] Claude関連プロセスを完全終了..." -ForegroundColor Yellow
+Write-Host "[Step 1/$totalSteps] Claude関連プロセスを完全終了..." -ForegroundColor Yellow
 
 $claudeProcesses = @("Claude", "claude", "Claude Desktop")
 foreach ($procName in $claudeProcesses) {
@@ -58,7 +60,7 @@ Write-Host ""
 # ============================================================
 # Step 2: インストール形式の検出 (MSIX / Squirrel)
 # ============================================================
-Write-Host "[Step 2/12] インストール形式を検出..." -ForegroundColor Yellow
+Write-Host "[Step 2/$totalSteps] インストール形式を検出..." -ForegroundColor Yellow
 
 $installType = "unknown"
 $claudeExe = $null
@@ -189,9 +191,273 @@ if ($claudeExe -and $installType -ne "msix") {
 Write-Host ""
 
 # ============================================================
-# Step 3: CoworkVMService 競合の検出と除去
+# Step 3: インストールログの分析と原因特定
 # ============================================================
-Write-Host "[Step 3/12] CoworkVMService 競合を確認..." -ForegroundColor Yellow
+Write-Host "[Step 3/$totalSteps] インストールログを分析..." -ForegroundColor Yellow
+
+$logAnalysisResults = @()
+
+# 3a: Squirrel インストールログの確認
+$squirrelLogPaths = @(
+    (Join-Path $localAppData "SquirrelTemp\Squirrel-Install.log"),
+    (Join-Path $localAppData "SquirrelTemp\SquirrelSetup.log")
+)
+
+$squirrelLogFound = $false
+foreach ($logPath in $squirrelLogPaths) {
+    if (Test-Path $logPath) {
+        $squirrelLogFound = $true
+        Write-Host "  Squirrelインストールログ: $logPath" -ForegroundColor Gray
+        try {
+            $logContent = Get-Content $logPath -Tail 50 -ErrorAction Stop
+            $errors = $logContent | Where-Object { $_ -match "error|fail|exception|fatal" }
+            if ($errors) {
+                Write-Host "  [問題] Squirrelログにエラーを検出:" -ForegroundColor Red
+                foreach ($err in ($errors | Select-Object -Last 5)) {
+                    Write-Host "    $err" -ForegroundColor DarkYellow
+                }
+                $logAnalysisResults += "Squirrelインストールログにエラーあり"
+            } else {
+                Write-Host "  Squirrelログ: エラーなし" -ForegroundColor Green
+            }
+        } catch {
+            Write-Host "  ログ読み取りに失敗: $_" -ForegroundColor Gray
+        }
+    }
+}
+if (-not $squirrelLogFound) {
+    Write-Host "  Squirrelインストールログなし (MSIX版または未インストール)" -ForegroundColor Gray
+}
+
+# 3b: MSIX/AppInstaller デプロイメントログの確認
+Write-Host "" -ForegroundColor Gray
+Write-Host "  MSIX デプロイメントログを確認..." -ForegroundColor Gray
+try {
+    $deployEvents = Get-WinEvent -LogName "Microsoft-Windows-AppXDeploymentServer/Operational" -MaxEvents 200 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Message -match "Claude" -and $_.TimeCreated -gt (Get-Date).AddDays(-7)
+        } | Select-Object -First 10
+
+    if ($deployEvents) {
+        $deployErrors = $deployEvents | Where-Object { $_.Level -le 2 }
+        $deployWarnings = $deployEvents | Where-Object { $_.Level -eq 3 }
+
+        if ($deployErrors) {
+            Write-Host "  [問題] MSIXデプロイメントエラーを検出 ($($deployErrors.Count)件):" -ForegroundColor Red
+            foreach ($evt in ($deployErrors | Select-Object -First 5)) {
+                $msg = $evt.Message
+                if ($msg.Length -gt 200) { $msg = $msg.Substring(0, 200) + "..." }
+                Write-Host "    [$($evt.TimeCreated.ToString('yyyy/MM/dd HH:mm:ss'))] $msg" -ForegroundColor DarkYellow
+            }
+
+            # HRESULT コードの解析
+            foreach ($evt in $deployErrors) {
+                if ($evt.Message -match "0x80073CF6") {
+                    $logAnalysisResults += "MSIX デプロイエラー: 0x80073CF6 (パッケージ競合 - CoworkVMService関連の可能性)"
+                    Write-Host "  → 原因: パッケージ競合 (0x80073CF6) - CoworkVMService が原因の可能性大" -ForegroundColor Yellow
+                }
+                if ($evt.Message -match "0x80073CFA") {
+                    $logAnalysisResults += "MSIX デプロイエラー: 0x80073CFA (旧パッケージ削除失敗)"
+                    Write-Host "  → 原因: 旧パッケージの削除に失敗 (0x80073CFA)" -ForegroundColor Yellow
+                }
+                if ($evt.Message -match "0x80073CFB") {
+                    $logAnalysisResults += "MSIX デプロイエラー: 0x80073CFB (依存パッケージ不足)"
+                    Write-Host "  → 原因: 依存パッケージ不足 (0x80073CFB)" -ForegroundColor Yellow
+                }
+                if ($evt.Message -match "0x80073CF9") {
+                    $logAnalysisResults += "MSIX デプロイエラー: 0x80073CF9 (インストール先アクセス拒否)"
+                    Write-Host "  → 原因: インストール先アクセス拒否 (0x80073CF9)" -ForegroundColor Yellow
+                }
+                if ($evt.Message -match "0x80080204") {
+                    $logAnalysisResults += "MSIX デプロイエラー: 0x80080204 (パッケージ署名検証失敗)"
+                    Write-Host "  → 原因: パッケージ署名の検証に失敗 (0x80080204)" -ForegroundColor Yellow
+                }
+            }
+        }
+
+        if ($deployWarnings) {
+            Write-Host "  MSIXデプロイメント警告: $($deployWarnings.Count)件" -ForegroundColor Yellow
+        }
+
+        if (-not $deployErrors -and -not $deployWarnings) {
+            Write-Host "  MSIXデプロイメントログ: 正常イベントのみ" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  直近7日間のClaude関連デプロイメントイベントなし" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  MSIXデプロイメントログの読み取りに失敗 (アクセス権限不足の可能性): $_" -ForegroundColor Gray
+}
+
+# 3c: Windows Applicationイベントログの確認 (Claude関連エラー)
+Write-Host "" -ForegroundColor Gray
+Write-Host "  Windowsアプリケーションログを確認..." -ForegroundColor Gray
+try {
+    $appEvents = Get-WinEvent -LogName Application -MaxEvents 500 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Message -match "Claude" -and $_.Level -le 2 -and $_.TimeCreated -gt (Get-Date).AddDays(-7)
+        } | Select-Object -First 10
+
+    if ($appEvents) {
+        Write-Host "  [問題] Claude関連のアプリケーションエラー ($($appEvents.Count)件):" -ForegroundColor Red
+        foreach ($evt in ($appEvents | Select-Object -First 5)) {
+            $msg = $evt.Message
+            if ($msg.Length -gt 200) { $msg = $msg.Substring(0, 200) + "..." }
+            Write-Host "    [$($evt.TimeCreated.ToString('yyyy/MM/dd HH:mm:ss'))] (ID:$($evt.Id)) $msg" -ForegroundColor DarkYellow
+        }
+
+        # 既知のエラーパターンの解析
+        foreach ($evt in $appEvents) {
+            if ($evt.Message -match "CoreMessaging\.dll" -and $evt.Message -match "0xc0000602") {
+                $logAnalysisResults += "CoreMessaging.dll クラッシュ (0xc0000602)"
+                Write-Host "  → 原因: CoreMessaging.dll 互換性問題" -ForegroundColor Yellow
+            }
+            if ($evt.Message -match "VCRUNTIME140\.dll|vcruntime140\.dll|MSVCP140\.dll") {
+                $logAnalysisResults += "Visual C++ ランタイムDLL読み込み失敗"
+                Write-Host "  → 原因: Visual C++ ランタイムが不足または破損" -ForegroundColor Yellow
+            }
+            if ($evt.Message -match "gpu.*crash|GPU.*error" -or ($evt.Message -match "Claude" -and $evt.Message -match "gpu")) {
+                $logAnalysisResults += "GPUドライバ関連クラッシュ"
+                Write-Host "  → 原因: GPUドライバの互換性問題 (--disable-gpu で回避可能)" -ForegroundColor Yellow
+            }
+            if ($evt.Id -eq 1000 -and $evt.Message -match "Claude") {
+                $logAnalysisResults += "アプリケーションクラッシュ (イベントID 1000)"
+                Write-Host "  → アプリケーションクラッシュ (イベントID 1000) を検出" -ForegroundColor Yellow
+            }
+            if ($evt.Id -eq 1001 -and $evt.Message -match "Claude") {
+                $logAnalysisResults += "Windows Error Reporting (イベントID 1001)"
+            }
+        }
+    } else {
+        Write-Host "  直近7日間のClaude関連エラーイベントなし" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  アプリケーションログの読み取りに失敗: $_" -ForegroundColor Gray
+}
+
+# 3d: Claude Desktop自体のログ確認
+Write-Host "" -ForegroundColor Gray
+Write-Host "  Claude Desktopアプリログを確認..." -ForegroundColor Gray
+
+$claudeLogPaths = @(
+    (Join-Path $configDir "logs"),
+    (Join-Path $configDir "log.txt"),
+    (Join-Path $configDir "main.log"),
+    (Join-Path $configDir "renderer.log")
+)
+
+# Electronのクラッシュダンプ確認
+$crashpadDir = Join-Path $configDir "Crashpad"
+$claudeLogFound = $false
+
+foreach ($logPath in $claudeLogPaths) {
+    if (Test-Path $logPath) {
+        $claudeLogFound = $true
+        if ((Get-Item $logPath).PSIsContainer) {
+            # ディレクトリの場合、中のログファイルを確認
+            $logFiles = Get-ChildItem $logPath -Filter "*.log" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 3
+            foreach ($lf in $logFiles) {
+                Write-Host "  ログファイル: $($lf.FullName) ($([math]::Round($lf.Length / 1KB)) KB, $($lf.LastWriteTime))" -ForegroundColor Gray
+                try {
+                    $logLines = Get-Content $lf.FullName -Tail 30 -ErrorAction Stop
+                    $logErrors = $logLines | Where-Object { $_ -match "error|fatal|crash|fail|ENOENT|EPERM|uncaughtException" }
+                    if ($logErrors) {
+                        Write-Host "  [問題] ログにエラーを検出:" -ForegroundColor Red
+                        foreach ($le in ($logErrors | Select-Object -Last 5)) {
+                            $leTrimmed = if ($le.Length -gt 200) { $le.Substring(0, 200) + "..." } else { $le }
+                            Write-Host "    $leTrimmed" -ForegroundColor DarkYellow
+                        }
+                        $logAnalysisResults += "Claude Desktopログにエラーあり ($($lf.Name))"
+                    }
+                } catch {
+                    Write-Host "  ログ読み取り失敗: $_" -ForegroundColor Gray
+                }
+            }
+        } else {
+            # ファイルの場合
+            Write-Host "  ログファイル: $logPath" -ForegroundColor Gray
+            try {
+                $logLines = Get-Content $logPath -Tail 30 -ErrorAction Stop
+                $logErrors = $logLines | Where-Object { $_ -match "error|fatal|crash|fail" }
+                if ($logErrors) {
+                    Write-Host "  [問題] ログにエラーを検出:" -ForegroundColor Red
+                    foreach ($le in ($logErrors | Select-Object -Last 5)) {
+                        $leTrimmed = if ($le.Length -gt 200) { $le.Substring(0, 200) + "..." } else { $le }
+                        Write-Host "    $leTrimmed" -ForegroundColor DarkYellow
+                    }
+                    $logAnalysisResults += "Claude Desktopログにエラーあり"
+                }
+            } catch {}
+        }
+    }
+}
+
+if (Test-Path $crashpadDir) {
+    $crashDumps = Get-ChildItem $crashpadDir -Filter "*.dmp" -Recurse -ErrorAction SilentlyContinue
+    if ($crashDumps) {
+        $recentCrashes = $crashDumps | Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-7) }
+        if ($recentCrashes) {
+            Write-Host "  [問題] 直近7日間のクラッシュダンプ: $($recentCrashes.Count)件" -ForegroundColor Red
+            foreach ($cd in ($recentCrashes | Sort-Object LastWriteTime -Descending | Select-Object -First 3)) {
+                Write-Host "    $($cd.Name) ($($cd.LastWriteTime), $([math]::Round($cd.Length / 1KB)) KB)" -ForegroundColor DarkYellow
+            }
+            $logAnalysisResults += "クラッシュダンプ $($recentCrashes.Count)件 (直近7日間)"
+        } else {
+            Write-Host "  過去のクラッシュダンプあり (7日以上前)" -ForegroundColor Gray
+        }
+    }
+}
+
+if (-not $claudeLogFound -and -not (Test-Path $crashpadDir)) {
+    Write-Host "  Claude Desktopのログなし (初回起動に失敗している可能性)" -ForegroundColor Yellow
+    $logAnalysisResults += "Claude Desktopログなし - 初回起動前の失敗の可能性"
+}
+
+# 3e: TEMP内のセットアップログ確認
+Write-Host "" -ForegroundColor Gray
+Write-Host "  TEMPフォルダのセットアップログを確認..." -ForegroundColor Gray
+
+$tempSetupLogs = Get-ChildItem $env:TEMP -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match "Claude" -and $_.Extension -match "\.(log|txt)$" } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 5
+
+if ($tempSetupLogs) {
+    foreach ($tLog in $tempSetupLogs) {
+        Write-Host "  セットアップログ: $($tLog.FullName) ($($tLog.LastWriteTime))" -ForegroundColor Gray
+        try {
+            $tLogContent = Get-Content $tLog.FullName -Tail 20 -ErrorAction Stop
+            $tLogErrors = $tLogContent | Where-Object { $_ -match "error|fail|exception" }
+            if ($tLogErrors) {
+                foreach ($tle in ($tLogErrors | Select-Object -Last 3)) {
+                    $tleTrimmed = if ($tle.Length -gt 200) { $tle.Substring(0, 200) + "..." } else { $tle }
+                    Write-Host "    $tleTrimmed" -ForegroundColor DarkYellow
+                }
+                $logAnalysisResults += "セットアップログにエラーあり ($($tLog.Name))"
+            }
+        } catch {}
+    }
+} else {
+    Write-Host "  TEMPフォルダにClaude関連のセットアップログなし" -ForegroundColor Gray
+}
+
+# ログ分析結果のサマリー
+Write-Host "" -ForegroundColor Gray
+if ($logAnalysisResults.Count -gt 0) {
+    Write-Host "  === ログ分析結果 ===" -ForegroundColor Cyan
+    foreach ($result in $logAnalysisResults) {
+        Write-Host "  ● $result" -ForegroundColor Yellow
+        $issuesFound += $result
+    }
+} else {
+    Write-Host "  ログ分析: 明確なエラーは検出されませんでした" -ForegroundColor Green
+}
+Write-Host ""
+
+# ============================================================
+# Step 4: CoworkVMService 競合の検出と除去
+# ============================================================
+Write-Host "[Step 4/$totalSteps] CoworkVMService 競合を確認..." -ForegroundColor Yellow
 
 # CoworkVMService はClaude MSIX パッケージ内の cowork-svc.exe が登録するサービス。
 # 再インストール時に旧サービスが残留すると、新パッケージのインストール/起動が失敗する。
@@ -336,9 +602,9 @@ if ($coworkService -or $coworkRegExists) {
 Write-Host ""
 
 # ============================================================
-# Step 4: 旧MSIXパッケージの競合クリーンアップ
+# Step 5: 旧MSIXパッケージの競合クリーンアップ
 # ============================================================
-Write-Host "[Step 4/12] 旧MSIXパッケージの競合を確認..." -ForegroundColor Yellow
+Write-Host "[Step 5/$totalSteps] 旧MSIXパッケージの競合を確認..." -ForegroundColor Yellow
 
 try {
     $allClaudePackages = Get-AppxPackage -ErrorAction SilentlyContinue |
@@ -377,9 +643,9 @@ try {
 Write-Host ""
 
 # ============================================================
-# Step 5: 旧Squirrelインストールのクリーンアップ
+# Step 6: 旧Squirrelインストールのクリーンアップ
 # ============================================================
-Write-Host "[Step 5/12] 旧Squirrelインストールのクリーンアップ..." -ForegroundColor Yellow
+Write-Host "[Step 6/$totalSteps] 旧Squirrelインストールのクリーンアップ..." -ForegroundColor Yellow
 
 if ($hasSquirrel -and $installType -eq "msix") {
     Write-Host "  MSIX版がインストール済みのため、旧Squirrelインストールを削除します。" -ForegroundColor Yellow
@@ -429,9 +695,9 @@ if ($hasSquirrel -and $installType -eq "msix") {
 Write-Host ""
 
 # ============================================================
-# Step 6: Visual C++ ランタイムの確認
+# Step 7: Visual C++ ランタイムの確認
 # ============================================================
-Write-Host "[Step 6/12] Visual C++ ランタイムを確認..." -ForegroundColor Yellow
+Write-Host "[Step 7/$totalSteps] Visual C++ ランタイムを確認..." -ForegroundColor Yellow
 
 $vcInstalled = $false
 $vcPaths = @(
@@ -460,9 +726,9 @@ if (-not $vcInstalled) {
 Write-Host ""
 
 # ============================================================
-# Step 7: WebView2 ランタイムの確認
+# Step 8: WebView2 ランタイムの確認
 # ============================================================
-Write-Host "[Step 7/12] WebView2 ランタイムを確認..." -ForegroundColor Yellow
+Write-Host "[Step 8/$totalSteps] WebView2 ランタイムを確認..." -ForegroundColor Yellow
 
 $webview2Installed = $false
 $webview2Paths = @(
@@ -484,9 +750,9 @@ if (-not $webview2Installed) {
 Write-Host ""
 
 # ============================================================
-# Step 8: CoreMessaging.dll の確認
+# Step 9: CoreMessaging.dll の確認
 # ============================================================
-Write-Host "[Step 8/12] CoreMessaging.dll を確認..." -ForegroundColor Yellow
+Write-Host "[Step 9/$totalSteps] CoreMessaging.dll を確認..." -ForegroundColor Yellow
 
 $coreMsgDll = Join-Path $env:SystemRoot "System32\CoreMessaging.dll"
 $coreMsgCrashDetected = $false
@@ -568,9 +834,9 @@ try {
 Write-Host ""
 
 # ============================================================
-# Step 9: Windows バージョン互換性チェック
+# Step 10: Windows バージョン互換性チェック
 # ============================================================
-Write-Host "[Step 9/12] Windows バージョン互換性を確認..." -ForegroundColor Yellow
+Write-Host "[Step 10/$totalSteps] Windows バージョン互換性を確認..." -ForegroundColor Yellow
 
 $osVersion = [System.Environment]::OSVersion.Version
 $osBuild = $osVersion.Build
@@ -611,9 +877,9 @@ if (Test-Path $netRegPath) {
 Write-Host ""
 
 # ============================================================
-# Step 10: ユーザーデータの完全リセット
+# Step 11: ユーザーデータの完全リセット
 # ============================================================
-Write-Host "[Step 10/12] ユーザーデータをリセット..." -ForegroundColor Yellow
+Write-Host "[Step 11/$totalSteps] ユーザーデータをリセット..." -ForegroundColor Yellow
 
 if (Test-Path $configDir) {
     # 設定ファイルのバックアップ
@@ -682,9 +948,9 @@ if ($installType -eq "msix" -and $msixPackage) {
 Write-Host ""
 
 # ============================================================
-# Step 11: 設定ファイルの検証・修復
+# Step 12: 設定ファイルの検証・修復
 # ============================================================
-Write-Host "[Step 11/12] 設定ファイルを検証・修復..." -ForegroundColor Yellow
+Write-Host "[Step 12/$totalSteps] 設定ファイルを検証・修復..." -ForegroundColor Yellow
 
 if (-not (Test-Path $configDir)) {
     New-Item -ItemType Directory -Path $configDir -Force | Out-Null
@@ -739,30 +1005,9 @@ if (-not (Test-Path $configFile)) {
 Write-Host ""
 
 # ============================================================
-# Step 12: 修復後の起動テスト
+# Step 13: 修復後の起動テスト
 # ============================================================
-Write-Host "[Step 12/12] 修復後の起動テスト..." -ForegroundColor Yellow
-
-# Windowsイベントログの確認
-try {
-    $events = Get-WinEvent -LogName Application -MaxEvents 50 -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Message -match "Claude" -and $_.Level -le 2
-        } | Select-Object -First 5
-
-    if ($events) {
-        Write-Host "  Claude関連のエラーイベント:" -ForegroundColor Red
-        foreach ($evt in $events) {
-            $msg = $evt.Message
-            if ($msg.Length -gt 150) { $msg = $msg.Substring(0, 150) + "..." }
-            Write-Host "  [$($evt.TimeCreated)] $msg" -ForegroundColor DarkGray
-        }
-    } else {
-        Write-Host "  Claude関連のエラーイベントなし" -ForegroundColor Green
-    }
-} catch {
-    Write-Host "  イベントログの読み取りに失敗: $_" -ForegroundColor Gray
-}
+Write-Host "[Step 13/$totalSteps] 修復後の起動テスト..." -ForegroundColor Yellow
 
 # 起動テスト
 if ($installType -eq "msix" -and $msixPackage) {
@@ -835,6 +1080,7 @@ Write-Host ""
 Write-Host "実行された修復:" -ForegroundColor White
 Write-Host "  - Claude関連プロセスの完全終了"
 Write-Host "  - インストール形式の検出と整合性チェック"
+Write-Host "  - インストールログの分析と原因特定"
 if ($coworkService) {
     Write-Host "  - CoworkVMService競合の対処"
 }

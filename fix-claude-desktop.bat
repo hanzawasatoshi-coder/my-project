@@ -15,7 +15,7 @@ set CLAUDE_EXE=
 REM ============================================================
 REM Step 1: Claude関連プロセスの完全終了
 REM ============================================================
-echo [Step 1/11] Claude関連プロセスを完全終了...
+echo [Step 1/12] Claude関連プロセスを完全終了...
 taskkill /f /im "Claude.exe" >nul 2>&1
 taskkill /f /im "claude.exe" >nul 2>&1
 timeout /t 3 /nobreak >nul
@@ -25,7 +25,7 @@ echo.
 REM ============================================================
 REM Step 2: インストール形式の検出 (MSIX / Squirrel)
 REM ============================================================
-echo [Step 2/11] インストール形式を検出...
+echo [Step 2/12] インストール形式を検出...
 
 REM MSIX版の検出
 powershell -NoProfile -Command "Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty PackageFullName" 2>nul | findstr /r "Claude" >nul 2>&1
@@ -70,9 +70,65 @@ if "%INSTALL_TYPE%"=="unknown" (
 echo.
 
 REM ============================================================
-REM Step 3: CoworkVMService 競合の確認と除去
+REM Step 3: インストールログの分析と原因特定
 REM ============================================================
-echo [Step 3/11] CoworkVMService 競合を確認...
+echo [Step 3/12] インストールログを分析...
+
+REM 3a: Squirrel インストールログの確認
+if exist "%LOCAL_APP%\SquirrelTemp\Squirrel-Install.log" (
+    echo   Squirrelインストールログ: %LOCAL_APP%\SquirrelTemp\Squirrel-Install.log
+    findstr /i "error fail exception fatal" "%LOCAL_APP%\SquirrelTemp\Squirrel-Install.log" >nul 2>&1
+    if not errorlevel 1 (
+        echo   [問題] Squirrelログにエラーを検出:
+        for /f "tokens=*" %%a in ('findstr /i "error fail exception fatal" "%LOCAL_APP%\SquirrelTemp\Squirrel-Install.log" 2^>nul') do echo     %%a
+    ) else (
+        echo   Squirrelログ: エラーなし
+    )
+) else (
+    echo   Squirrelインストールログなし
+)
+
+REM 3b: MSIX デプロイメントログの確認
+echo.
+echo   MSIXデプロイメントログを確認...
+powershell -NoProfile -Command "try { $events = Get-WinEvent -LogName 'Microsoft-Windows-AppXDeploymentServer/Operational' -MaxEvents 200 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'Claude' -and $_.TimeCreated -gt (Get-Date).AddDays(-7) -and $_.Level -le 2 } | Select-Object -First 5; if ($events) { Write-Host '  [問題] MSIXデプロイメントエラーを検出:' -ForegroundColor Red; foreach ($e in $events) { $m = $e.Message; if ($m.Length -gt 200) { $m = $m.Substring(0,200) + '...' }; Write-Host ('    [' + $e.TimeCreated.ToString('yyyy/MM/dd HH:mm:ss') + '] ' + $m) -ForegroundColor DarkYellow; if ($e.Message -match '0x80073CF6') { Write-Host '    -> パッケージ競合 (CoworkVMService関連の可能性)' -ForegroundColor Yellow }; if ($e.Message -match '0x80073CFA') { Write-Host '    -> 旧パッケージ削除失敗' -ForegroundColor Yellow }; if ($e.Message -match '0x80073CFB') { Write-Host '    -> 依存パッケージ不足' -ForegroundColor Yellow } } } else { Write-Host '  直近7日間のClaude関連デプロイメントエラーなし' -ForegroundColor Green } } catch { Write-Host '  MSIXデプロイメントログの読み取りに失敗' -ForegroundColor Gray }" 2>nul
+
+REM 3c: Windows Applicationイベントログの確認
+echo.
+echo   Windowsアプリケーションログを確認...
+powershell -NoProfile -Command "try { $events = Get-WinEvent -LogName Application -MaxEvents 500 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'Claude' -and $_.Level -le 2 -and $_.TimeCreated -gt (Get-Date).AddDays(-7) } | Select-Object -First 5; if ($events) { Write-Host '  [問題] Claude関連のアプリケーションエラー:' -ForegroundColor Red; foreach ($e in $events) { $m = $e.Message; if ($m.Length -gt 200) { $m = $m.Substring(0,200) + '...' }; Write-Host ('    [' + $e.TimeCreated.ToString('yyyy/MM/dd HH:mm:ss') + '] (ID:' + $e.Id + ') ' + $m) -ForegroundColor DarkYellow; if ($e.Message -match 'CoreMessaging\.dll' -and $e.Message -match '0xc0000602') { Write-Host '    -> CoreMessaging.dll 互換性問題' -ForegroundColor Yellow }; if ($e.Message -match 'VCRUNTIME140|vcruntime140|MSVCP140') { Write-Host '    -> Visual C++ ランタイム不足/破損' -ForegroundColor Yellow } } } else { Write-Host '  直近7日間のClaude関連エラーなし' -ForegroundColor Green } } catch { Write-Host '  アプリケーションログの読み取りに失敗' -ForegroundColor Gray }" 2>nul
+
+REM 3d: Claude Desktopアプリログの確認
+echo.
+echo   Claude Desktopアプリログを確認...
+if exist "%CONFIG_DIR%\logs" (
+    echo   ログディレクトリ: %CONFIG_DIR%\logs
+    for %%f in ("%CONFIG_DIR%\logs\*.log") do (
+        echo   ログファイル: %%f
+        findstr /i "error fatal crash fail uncaughtException" "%%f" >nul 2>&1
+        if not errorlevel 1 (
+            echo   [問題] ログにエラーを検出:
+            for /f "tokens=*" %%a in ('findstr /i "error fatal crash fail" "%%f" 2^>nul') do echo     %%a
+        )
+    )
+) else (
+    echo   Claude Desktopログなし (初回起動に失敗している可能性)
+)
+
+REM 3e: クラッシュダンプの確認
+if exist "%CONFIG_DIR%\Crashpad" (
+    dir /b "%CONFIG_DIR%\Crashpad\*.dmp" >nul 2>&1
+    if not errorlevel 1 (
+        echo   [問題] クラッシュダンプファイルが存在します
+        for %%f in ("%CONFIG_DIR%\Crashpad\*.dmp") do echo     %%~nxf (%%~tf)
+    )
+)
+echo.
+
+REM ============================================================
+REM Step 4: CoworkVMService 競合の確認と除去
+REM ============================================================
+echo [Step 4/12] CoworkVMService 競合を確認...
 REM CoworkVMService はClaude MSIXパッケージが所有するサービス。
 REM 更新インストール時に競合し HRESULT 0x80073CF6 エラーの原因になる。
 REM 解決策: MSIXパッケージを先に削除してからレジストリ残留を除去する。
@@ -131,9 +187,9 @@ if not errorlevel 1 (
 echo.
 
 REM ============================================================
-REM Step 4: 旧Squirrelインストールのクリーンアップ
+REM Step 5: 旧Squirrelインストールのクリーンアップ
 REM ============================================================
-echo [Step 4/11] 旧Squirrelインストールのクリーンアップ...
+echo [Step 5/12] 旧Squirrelインストールのクリーンアップ...
 if "%INSTALL_TYPE%"=="msix" (
     if exist "%LOCAL_APP%\AnthropicClaude" (
         echo   MSIX版がインストール済みのため、旧Squirrelインストールを削除します。
@@ -157,9 +213,9 @@ if "%INSTALL_TYPE%"=="msix" (
 echo.
 
 REM ============================================================
-REM Step 5: Visual C++ ランタイムの確認
+REM Step 6: Visual C++ ランタイムの確認
 REM ============================================================
-echo [Step 5/11] Visual C++ ランタイムを確認...
+echo [Step 6/12] Visual C++ ランタイムを確認...
 if exist "%SystemRoot%\System32\vcruntime140.dll" (
     echo   vcruntime140.dll: OK
 ) else (
@@ -169,9 +225,9 @@ if exist "%SystemRoot%\System32\vcruntime140.dll" (
 echo.
 
 REM ============================================================
-REM Step 6: CoreMessaging.dll の確認
+REM Step 7: CoreMessaging.dll の確認
 REM ============================================================
-echo [Step 6/11] CoreMessaging.dll を確認...
+echo [Step 7/12] CoreMessaging.dll を確認...
 if exist "%SystemRoot%\System32\CoreMessaging.dll" (
     echo   CoreMessaging.dll: 存在確認OK
 ) else (
@@ -181,9 +237,9 @@ if exist "%SystemRoot%\System32\CoreMessaging.dll" (
 echo.
 
 REM ============================================================
-REM Step 7: Windows バージョン互換性チェック
+REM Step 8: Windows バージョン互換性チェック
 REM ============================================================
-echo [Step 7/11] Windows バージョン互換性を確認...
+echo [Step 8/12] Windows バージョン互換性を確認...
 for /f "tokens=2 delims==" %%a in ('wmic os get BuildNumber /value 2^>nul ^| findstr BuildNumber') do set OS_BUILD=%%a
 if defined OS_BUILD (
     echo   Windows ビルド: %OS_BUILD%
@@ -201,7 +257,7 @@ echo.
 REM ============================================================
 REM Step 8: 設定ファイルのバックアップ
 REM ============================================================
-echo [Step 8/11] 設定ファイルをバックアップ...
+echo [Step 9/12] 設定ファイルをバックアップ...
 if exist "%CONFIG_FILE%" (
     copy "%CONFIG_FILE%" "%CONFIG_FILE%.backup.%date:~0,4%%date:~5,2%%date:~8,2%" >nul 2>&1
     echo   バックアップ完了
@@ -211,9 +267,9 @@ if exist "%CONFIG_FILE%" (
 echo.
 
 REM ============================================================
-REM Step 7: ユーザーデータの完全リセット
+REM Step 10: ユーザーデータの完全リセット
 REM ============================================================
-echo [Step 9/11] ユーザーデータをリセット (設定ファイルは保持)...
+echo [Step 10/12] ユーザーデータをリセット (設定ファイルは保持)...
 
 for %%d in (Cache "Code Cache" GPUCache DawnCache DawnWebGPUCache blob_storage "Session Storage" "Local Storage" IndexedDB "Service Worker" "Shared Dictionary" WebStorage Network databases CachedData Crashpad logs tmp) do (
     if exist "%CONFIG_DIR%\%%~d" (
@@ -233,9 +289,9 @@ echo   リセット完了
 echo.
 
 REM ============================================================
-REM Step 8: 設定ファイルの検証・修復
+REM Step 11: 設定ファイルの検証・修復
 REM ============================================================
-echo [Step 10/11] 設定ファイルを検証...
+echo [Step 11/12] 設定ファイルを検証...
 if not exist "%CONFIG_DIR%" mkdir "%CONFIG_DIR%"
 
 if not exist "%CONFIG_FILE%" (
@@ -254,9 +310,9 @@ if not exist "%CONFIG_FILE%" (
 echo.
 
 REM ============================================================
-REM Step 9: 修復後の起動テスト
+REM Step 12: 修復後の起動テスト
 REM ============================================================
-echo [Step 11/11] 修復後の起動テスト...
+echo [Step 12/12] 修復後の起動テスト...
 if "%INSTALL_TYPE%"=="msix" (
     if defined MSIX_FAMILY (
         echo   MSIX版Claude Desktopを起動しています...
@@ -305,6 +361,7 @@ echo.
 echo 実行された修復:
 echo   - Claude関連プロセスの完全終了
 echo   - インストール形式の検出と整合性チェック
+echo   - インストールログの分析と原因特定
 echo   - CoworkVMService競合の確認
 echo   - 旧Squirrelインストールのクリーンアップ
 echo   - キャッシュ・一時ファイルの完全削除

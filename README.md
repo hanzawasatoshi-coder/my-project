@@ -25,15 +25,16 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 |----------|------|
 | 1 | Claude関連プロセスの完全終了 |
 | 2 | インストール形式の検出 (MSIX / Squirrel / スタンドアロン) |
-| 3 | CoworkVMService競合の検出と除去 |
-| 4 | 旧MSIXパッケージの競合クリーンアップ (PowerShell版のみ) |
-| 5 | 旧Squirrelインストールのクリーンアップ |
-| 6 | Visual C++ / WebView2 ランタイムの確認 |
-| 7 | CoreMessaging.dll の存在・整合性チェック |
-| 8 | Windows バージョン互換性チェック / .NET Framework確認 |
-| 9 | ユーザーデータの完全リセット (キャッシュ・一時ファイル削除) |
-| 10 | 設定ファイル (claude_desktop_config.json) の検証・修復 / MCP設定の検証 |
-| 11 | 起動テスト (MSIX版: shell:AppsFolder経由 / 旧版: --disable-gpu) |
+| 3 | インストールログの分析と原因特定 (Squirrelログ / MSIXデプロイログ / イベントログ / クラッシュダンプ) |
+| 4 | CoworkVMService競合の検出と除去 |
+| 5 | 旧MSIXパッケージの競合クリーンアップ (PowerShell版のみ) |
+| 6 | 旧Squirrelインストールのクリーンアップ |
+| 7 | Visual C++ / WebView2 ランタイムの確認 |
+| 8 | CoreMessaging.dll の存在・整合性チェック |
+| 9 | Windows バージョン互換性チェック / .NET Framework確認 |
+| 10 | ユーザーデータの完全リセット (キャッシュ・一時ファイル削除) |
+| 11 | 設定ファイル (claude_desktop_config.json) の検証・修復 / MCP設定の検証 |
+| 12 | 起動テスト (MSIX版: shell:AppsFolder経由 / 旧版: --disable-gpu) |
 
 ## よくある原因
 
@@ -51,6 +52,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | GPUドライバの問題 | 白画面 or クラッシュ | `--disable-gpu` オプションで起動 |
 | Visual C++ 未インストール | 起動直後にクラッシュ | VC++ Redistributableをインストール |
 | インストール破損 | 各種エラー | 再インストール |
+| 原因不明の起動失敗 | エラーダイアログのみ | スクリプトがインストールログ・イベントログ・クラッシュダンプを自動分析して原因特定 |
 
 ## スクリプト実行後もエラーが続く場合
 
