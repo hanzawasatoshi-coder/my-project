@@ -47,7 +47,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | 設定ファイルの破損 | 起動直後にエラーダイアログ | スクリプトが自動修復 |
 | MCP設定の問題 | 起動中にハング or エラー | MCP設定を無効化して確認 |
 | CoreMessaging.dll 破損/欠落 | 起動直後にクラッシュ or エラー | `DISM /Online /Cleanup-Image /RestoreHealth` で修復 |
-| CoreMessaging.dll 互換性問題 (0xc0000602) | MSIX版で毎回クラッシュ。イベントログに `CoreMessaging.dll` + `0xc0000602` | Windows Update適用、Windows App SDK更新、Windows 11へのアップグレード |
+| CoreMessaging.dll 互換性問題 | MSIX版で毎回クラッシュ。イベントログに `Faulting module: CoreMessaging.dll` | `sfc /scannow` + `DISM /Online /Cleanup-Image /RestoreHealth` で修復、Windows Update適用、Windows App SDK更新 |
+| CoreMessaging.dll バージョン不整合 | DLLビルド番号とOSビルド番号が異なる (例: DLL=19041, OS=19045) | `sfc /scannow` + `DISM /Online /Cleanup-Image /RestoreHealth` + Windows Update |
 | Windows 10 サービス終了バージョン | CoreMessaging.dllクラッシュで起動直後にエラー。ビルド19041(2004)等 | Windows 10 22H2に更新またはWindows 11にアップグレード |
 | Windows バージョンが古い | インストール/起動失敗 | Windows 10 1809 (Build 17763) 以降に更新 |
 | GPUドライバの問題 | 白画面 or クラッシュ | `--disable-gpu` オプションで起動 |

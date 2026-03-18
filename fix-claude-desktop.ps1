@@ -308,9 +308,9 @@ try {
 
         # 既知のエラーパターンの解析
         foreach ($evt in $appEvents) {
-            if ($evt.Message -match "CoreMessaging\.dll" -and $evt.Message -match "0xc0000602") {
-                $logAnalysisResults += "CoreMessaging.dll クラッシュ (0xc0000602)"
-                Write-Host "  → 原因: CoreMessaging.dll 互換性問題" -ForegroundColor Yellow
+            if ($evt.Message -match "CoreMessaging\.dll") {
+                $logAnalysisResults += "CoreMessaging.dll クラッシュ"
+                Write-Host "  → 原因: CoreMessaging.dll 互換性問題 (Faulting module)" -ForegroundColor Yellow
             }
             if ($evt.Message -match "VCRUNTIME140\.dll|vcruntime140\.dll|MSVCP140\.dll") {
                 $logAnalysisResults += "Visual C++ ランタイムDLL読み込み失敗"
@@ -774,26 +774,76 @@ if (Test-Path $coreMsgDll) {
     $issuesFound += "CoreMessaging.dll 欠落"
 }
 
-# CoreMessaging.dll での過去のクラッシュを検出 (例外コード 0xc0000602)
+# CoreMessaging.dll での過去のクラッシュを検出 (任意の例外コード)
 try {
-    $coreMsgCrashes = Get-WinEvent -LogName Application -MaxEvents 100 -ErrorAction SilentlyContinue |
+    $coreMsgCrashes = Get-WinEvent -LogName Application -MaxEvents 200 -ErrorAction SilentlyContinue |
         Where-Object {
             $_.Message -match "Claude" -and
-            $_.Message -match "CoreMessaging\.dll" -and
-            $_.Message -match "0xc0000602"
+            $_.Message -match "CoreMessaging\.dll"
         } | Select-Object -First 1
+
+    # 特定の例外コードを抽出
+    $exceptionCode = ""
+    if ($coreMsgCrashes -and $coreMsgCrashes.Message -match "Exception code:\s*(0x[0-9a-fA-F]+)") {
+        $exceptionCode = $Matches[1]
+    }
 
     if ($coreMsgCrashes) {
         $coreMsgCrashDetected = $true
-        Write-Host "  [問題] CoreMessaging.dll クラッシュ (0xc0000602) を検出" -ForegroundColor Red
-        Write-Host "  STATUS_FAIL_FAST_EXCEPTION: MSIX パッケージと CoreMessaging.dll の互換性問題" -ForegroundColor Yellow
-        $issuesFound += "CoreMessaging.dll クラッシュ (0xc0000602)"
+        if ($exceptionCode) {
+            Write-Host "  [問題] CoreMessaging.dll クラッシュを検出 (例外コード: $exceptionCode)" -ForegroundColor Red
+        } else {
+            Write-Host "  [問題] CoreMessaging.dll クラッシュを検出" -ForegroundColor Red
+        }
+        Write-Host "  Faulting module: CoreMessaging.dll — MSIX パッケージとの互換性問題" -ForegroundColor Yellow
 
-        # 対処1: Windows App Runtime の確認
+        # CoreMessaging.dll のバージョンとOSビルドの不整合チェック
+        $osBuild = [System.Environment]::OSVersion.Version.Build
+        if ((Test-Path $coreMsgDll) -and $coreMsgInfo) {
+            $dllBuild = $coreMsgInfo.FileVersion -replace '.*?(\d{5})\..*', '$1'
+            if ($dllBuild -and $osBuild -and ($dllBuild -ne $osBuild.ToString())) {
+                Write-Host "  [問題] CoreMessaging.dll ビルド ($dllBuild) と OS ビルド ($osBuild) が不一致" -ForegroundColor Red
+                Write-Host "  DISM /Online /Cleanup-Image /RestoreHealth で修復、または Windows Update を適用してください" -ForegroundColor Yellow
+                $issuesFound += "CoreMessaging.dll バージョン不整合 (DLL: $dllBuild, OS: $osBuild)"
+            }
+        }
+
+        $issuesFound += "CoreMessaging.dll クラッシュ"
+
+        # 対処: CoreMessaging.dll 互換性問題の自動修復
         Write-Host "" -ForegroundColor Gray
         Write-Host "  --- CoreMessaging.dll 互換性問題の自動修復 ---" -ForegroundColor Cyan
 
-        # フレームワークパッケージの再登録
+        # 対処1: システムファイルの修復 (管理者権限が必要)
+        if ($isAdmin) {
+            Write-Host "  システムファイルチェッカーを実行しています (sfc /scannow)..." -ForegroundColor Gray
+            Write-Host "  (数分かかる場合があります)" -ForegroundColor Gray
+            $sfcResult = & sfc /scannow 2>&1
+            $sfcOutput = $sfcResult | Out-String
+            if ($sfcOutput -match "整合性違反を検出しました" -or $sfcOutput -match "found integrity violations" -or $sfcOutput -match "修復しました" -or $sfcOutput -match "successfully repaired") {
+                Write-Host "  sfc: 破損ファイルを検出・修復しました" -ForegroundColor Green
+            } elseif ($sfcOutput -match "違反を検出しませんでした" -or $sfcOutput -match "did not find any integrity violations") {
+                Write-Host "  sfc: 破損なし" -ForegroundColor Green
+            } else {
+                Write-Host "  sfc: 完了 (結果を確認してください)" -ForegroundColor Yellow
+            }
+
+            Write-Host "  DISM でコンポーネントストアを修復しています..." -ForegroundColor Gray
+            $dismResult = & DISM /Online /Cleanup-Image /RestoreHealth 2>&1
+            $dismOutput = $dismResult | Out-String
+            if ($dismOutput -match "復元操作は正常に完了しました" -or $dismOutput -match "The restore operation completed successfully") {
+                Write-Host "  DISM: 修復完了" -ForegroundColor Green
+            } else {
+                Write-Host "  DISM: 完了 (結果を確認してください)" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  [スキップ] sfc /scannow と DISM は管理者権限が必要です" -ForegroundColor Yellow
+            Write-Host "  管理者権限のPowerShellで以下を実行してください:" -ForegroundColor Yellow
+            Write-Host "    sfc /scannow" -ForegroundColor White
+            Write-Host "    DISM /Online /Cleanup-Image /RestoreHealth" -ForegroundColor White
+        }
+
+        # 対処2: フレームワークパッケージの再登録
         Write-Host "  フレームワークパッケージを再登録しています..." -ForegroundColor Gray
         Get-AppxPackage -AllUsers "*Framework*" -ErrorAction SilentlyContinue | ForEach-Object {
             $manifestPath = Join-Path $_.InstallLocation "AppxManifest.xml"
@@ -803,7 +853,7 @@ try {
         }
         Write-Host "  フレームワーク再登録完了" -ForegroundColor Green
 
-        # Windows App Runtime の最新バージョン確認
+        # 対処3: Windows App Runtime の最新バージョン確認
         $latestRuntime = Get-AppxPackage "*WindowsAppRuntime*" -ErrorAction SilentlyContinue |
             Sort-Object -Property Version -Descending | Select-Object -First 1
         if ($latestRuntime) {
@@ -817,7 +867,7 @@ try {
         # MSIX版で問題が続く場合の代替案を提示
         Write-Host "" -ForegroundColor Gray
         Write-Host "  この問題が解決しない場合の対処法:" -ForegroundColor Yellow
-        Write-Host "  1. Windows Updateで最新の状態に更新" -ForegroundColor White
+        Write-Host "  1. Windows Updateで最新の状態に更新してPCを再起動" -ForegroundColor White
         Write-Host "  2. Claude MSIX を再インストール:" -ForegroundColor White
         Write-Host "     Get-AppxPackage 'Claude' | Remove-AppxPackage" -ForegroundColor Gray
         Write-Host "     その後 https://claude.ai/download から再インストール" -ForegroundColor Gray
@@ -1078,6 +1128,18 @@ if ($installType -eq "msix" -and $msixPackage) {
         } else {
             Write-Host "  起動に失敗しました" -ForegroundColor Red
             $issuesFound += "修復後も起動失敗"
+
+            # CoreMessaging.dll クラッシュが検出されていた場合、追加のガイダンスを表示
+            if ($coreMsgCrashDetected) {
+                Write-Host "" -ForegroundColor Gray
+                Write-Host "  ★ CoreMessaging.dll の問題が原因で起動できない可能性が高いです" -ForegroundColor Red
+                Write-Host "  以下の手順を順番にお試しください:" -ForegroundColor Yellow
+                Write-Host "  1. Windows Update を実行して PC を再起動" -ForegroundColor White
+                Write-Host "  2. 管理者 PowerShell で以下を実行:" -ForegroundColor White
+                Write-Host "     sfc /scannow" -ForegroundColor Gray
+                Write-Host "     DISM /Online /Cleanup-Image /RestoreHealth" -ForegroundColor Gray
+                Write-Host "  3. PC を再起動後、Claude Desktop を再度起動" -ForegroundColor White
+            }
         }
     }
 } elseif ($claudeExe) {
