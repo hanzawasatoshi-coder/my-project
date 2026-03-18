@@ -37,7 +37,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 | 原因 | 症状 | 解決策 |
 |------|------|--------|
-| CoworkVMService競合 | インストール成功するが起動しない | スクリプトが自動検出・除去 |
+| CoworkVMService残留 | インストール成功するが起動しない。Claude MSIX内の `cowork-svc.exe` の残留サービスで、`sc.exe delete` では削除不可 | スクリプトがレジストリから直接削除 |
 | 旧MSIXパッケージ残留 | HRESULT 0x80073CFA エラー | スクリプトが旧パッケージを削除 |
 | 旧Squirrelインストール残留 | MSIX版とSquirrel版が競合 | スクリプトが旧版をアンインストール |
 | ユーザーデータの破損 | 起動直後に "failed to Launch" | スクリプトが自動リセット |
@@ -57,9 +57,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
    その後、https://claude.ai/download から再インストール
 3. **CoworkVMServiceの手動削除** (管理者権限のPowerShellで):
    ```powershell
+   # sc.exe delete はMSIXパッケージ型サービスには使えないため、レジストリから直接削除
    sc.exe stop CoworkVMService
-   sc.exe config CoworkVMService start= disabled
-   sc.exe delete CoworkVMService
+   Remove-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService' -Recurse -Force
    ```
 4. **完全リセット**: `%APPDATA%\Claude` フォルダを削除してから再インストール
 5. **Visual C++ Redistributable**: https://aka.ms/vs/17/release/vc_redist.x64.exe をインストール
@@ -68,7 +68,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ## 手動での修正方法
 
 1. タスクマネージャーでClaude関連プロセスを全て終了
-2. 管理者権限のコマンドプロンプトで `sc.exe query CoworkVMService` を実行し、存在する場合は `sc.exe delete CoworkVMService` で削除
+2. 管理者権限のPowerShellで `sc.exe query CoworkVMService` を実行し、存在する場合はレジストリから削除: `Remove-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService' -Recurse -Force`
 3. MSIX版の場合: `Get-AppxPackage 'Claude' | Remove-AppxPackage` でアンインストール後、再インストール
 4. `%APPDATA%\Claude` フォルダ内のファイルを削除（claude_desktop_config.jsonは残す）
 5. `claude_desktop_config.json` の内容を `{}` に置き換えて保存

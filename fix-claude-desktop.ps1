@@ -193,42 +193,62 @@ Write-Host ""
 # ============================================================
 Write-Host "[Step 3/10] CoworkVMService 競合を確認..." -ForegroundColor Yellow
 
+# CoworkVMService はClaude MSIX パッケージ内の cowork-svc.exe が登録するサービス。
+# 再インストール時に旧サービスが残留すると、新パッケージのインストール/起動が失敗する。
+# MSIX パッケージ型サービス (type WIN32_PACKAGED_PROCESS) のため sc.exe delete では
+# 削除できず、レジストリからの直接削除が必要。
+
+$svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService"
 $coworkService = Get-Service -Name "CoworkVMService" -ErrorAction SilentlyContinue
-if ($coworkService) {
-    Write-Host "  [問題] CoworkVMService が検出されました (状態: $($coworkService.Status))" -ForegroundColor Red
-    Write-Host "  このサービスはClaude Desktopの起動と競合することがあります。" -ForegroundColor Yellow
-    $issuesFound += "CoworkVMService 競合"
+$coworkRegExists = Test-Path $svcRegPath
+
+if ($coworkService -or $coworkRegExists) {
+    Write-Host "  [問題] CoworkVMService が検出されました" -ForegroundColor Red
+
+    # サービスの詳細を表示
+    if ($coworkRegExists) {
+        $svcReg = Get-ItemProperty $svcRegPath -ErrorAction SilentlyContinue
+        if ($svcReg.ImagePath) {
+            Write-Host "  ImagePath: $($svcReg.ImagePath)" -ForegroundColor Gray
+        }
+        if ($svcReg.PackageFullName) {
+            Write-Host "  所有パッケージ: $($svcReg.PackageFullName)" -ForegroundColor Gray
+        }
+    }
+
+    Write-Host "  このサービスはClaude (cowork-svc.exe) の残留サービスです。" -ForegroundColor Yellow
+    Write-Host "  再インストール時に競合し、起動失敗の原因になります。" -ForegroundColor Yellow
+    $issuesFound += "CoworkVMService 残留 (Claude cowork-svc.exe)"
 
     if ($isAdmin) {
-        Write-Host "  CoworkVMServiceを停止・無効化しています..." -ForegroundColor Yellow
-        try {
-            if ($coworkService.Status -eq "Running") {
+        # まずサービスの停止を試行
+        if ($coworkService -and $coworkService.Status -eq "Running") {
+            try {
                 Stop-Service -Name "CoworkVMService" -Force -ErrorAction Stop
                 Write-Host "  サービスを停止しました" -ForegroundColor Green
+            } catch {
+                # sc.exe でも試行
+                & sc.exe stop "CoworkVMService" 2>&1 | Out-Null
+                Write-Host "  サービス停止を試行しました" -ForegroundColor Yellow
             }
-            Set-Service -Name "CoworkVMService" -StartupType Disabled -ErrorAction Stop
-            Write-Host "  サービスを無効化しました" -ForegroundColor Green
+        }
 
-            # サービスの削除を試行
-            $scResult = & sc.exe delete "CoworkVMService" 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "  サービスを削除しました" -ForegroundColor Green
-            } else {
-                Write-Host "  サービスの削除に失敗 (再起動後に削除されます): $scResult" -ForegroundColor Yellow
+        # MSIX パッケージ型サービスは sc.exe delete では削除できないため
+        # レジストリから直接削除する
+        if ($coworkRegExists) {
+            try {
+                Remove-Item -Path $svcRegPath -Recurse -Force -ErrorAction Stop
+                Write-Host "  レジストリからサービスを削除しました" -ForegroundColor Green
+            } catch {
+                Write-Host "  レジストリ削除に失敗: $_" -ForegroundColor Red
+                Write-Host "  手動で削除してください:" -ForegroundColor Yellow
+                Write-Host "    Remove-Item -Path '$svcRegPath' -Recurse -Force" -ForegroundColor Gray
             }
-        } catch {
-            Write-Host "  サービスの停止/無効化に失敗: $_" -ForegroundColor Red
-            Write-Host "  手動で対処してください:" -ForegroundColor Yellow
-            Write-Host "    sc.exe stop CoworkVMService" -ForegroundColor Gray
-            Write-Host "    sc.exe config CoworkVMService start= disabled" -ForegroundColor Gray
-            Write-Host "    sc.exe delete CoworkVMService" -ForegroundColor Gray
         }
     } else {
         Write-Host "  [要管理者権限] サービスの除去には管理者権限が必要です。" -ForegroundColor Yellow
         Write-Host "  管理者権限でPowerShellを起動し、以下を実行してください:" -ForegroundColor Yellow
-        Write-Host "    sc.exe stop CoworkVMService" -ForegroundColor Gray
-        Write-Host "    sc.exe config CoworkVMService start= disabled" -ForegroundColor Gray
-        Write-Host "    sc.exe delete CoworkVMService" -ForegroundColor Gray
+        Write-Host "    Remove-Item -Path '$svcRegPath' -Recurse -Force" -ForegroundColor Gray
     }
 } else {
     Write-Host "  CoworkVMService なし - OK" -ForegroundColor Green

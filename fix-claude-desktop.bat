@@ -73,28 +73,27 @@ REM ============================================================
 REM Step 3: CoworkVMService 競合の確認
 REM ============================================================
 echo [Step 3/9] CoworkVMService 競合を確認...
+REM CoworkVMService はClaude MSIX内の cowork-svc.exe の残留サービス。
+REM MSIXパッケージ型サービスのため sc.exe delete では削除不可。レジストリ削除が必要。
 sc query CoworkVMService >nul 2>&1
 if not errorlevel 1 (
     echo   [問題] CoworkVMService が検出されました
-    echo   このサービスはClaude Desktopの起動と競合することがあります。
+    echo   Claude (cowork-svc.exe) の残留サービスです。起動失敗の原因になります。
     echo.
-    echo   管理者権限で以下を実行して削除してください:
-    echo     sc.exe stop CoworkVMService
-    echo     sc.exe config CoworkVMService start= disabled
-    echo     sc.exe delete CoworkVMService
-    echo.
-    REM 管理者権限なら自動的に対処
     net session >nul 2>&1
     if not errorlevel 1 (
         echo   管理者権限を検出。自動対処します...
         sc.exe stop CoworkVMService >nul 2>&1
-        sc.exe config CoworkVMService start= disabled >nul 2>&1
-        sc.exe delete CoworkVMService >nul 2>&1
+        REM レジストリから直接削除 (sc.exe deleteはMSIXパッケージ型サービスに使用不可)
+        reg delete "HKLM\SYSTEM\CurrentControlSet\Services\CoworkVMService" /f >nul 2>&1
         if not errorlevel 1 (
-            echo   CoworkVMServiceを削除しました
+            echo   レジストリからサービスを削除しました
         ) else (
-            echo   削除に失敗。再起動後にもう一度お試しください
+            echo   削除に失敗。PowerShell版スクリプトの使用を推奨します
         )
+    ) else (
+        echo   [要管理者権限] 管理者権限でPowerShellを起動し以下を実行:
+        echo     Remove-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService' -Recurse -Force
     )
 ) else (
     echo   CoworkVMService なし - OK
