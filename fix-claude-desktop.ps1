@@ -454,13 +454,13 @@ $netRegPath = "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full"
 if (Test-Path $netRegPath) {
     $netRelease = (Get-ItemProperty $netRegPath -ErrorAction SilentlyContinue).Release
     if ($netRelease) {
-        $netVersion = switch {
-            ($netRelease -ge 533320) { "4.8.1以降" }
-            ($netRelease -ge 528040) { "4.8" }
-            ($netRelease -ge 461808) { "4.7.2" }
-            ($netRelease -ge 461308) { "4.7.1" }
-            ($netRelease -ge 460798) { "4.7" }
-            ($netRelease -ge 394802) { "4.6.2" }
+        $netVersion = switch ($true) {
+            ($netRelease -ge 533320) { "4.8.1以降"; break }
+            ($netRelease -ge 528040) { "4.8"; break }
+            ($netRelease -ge 461808) { "4.7.2"; break }
+            ($netRelease -ge 461308) { "4.7.1"; break }
+            ($netRelease -ge 460798) { "4.7"; break }
+            ($netRelease -ge 394802) { "4.6.2"; break }
             default { "4.6未満" }
         }
         Write-Host "  .NET Framework: $netVersion (Release $netRelease)" -ForegroundColor Green
