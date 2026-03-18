@@ -2,6 +2,8 @@
 
 Windows上でClaude Desktop起動時に「**Claude Desktop failed to Launch**」エラーが表示される問題を修正するツールです。
 
+MSIX版（新インストーラー）とSquirrel版（旧インストーラー）の両方に対応しています。
+
 ## 使い方
 
 ### PowerShell版（推奨）
@@ -22,18 +24,22 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | ステップ | 内容 |
 |----------|------|
 | 1 | Claude関連プロセスの完全終了 |
-| 2 | インストール状態の確認 (app.asarの整合性チェック) |
-| 3 | Visual C++ ランタイムの確認 |
-| 4 | WebView2 ランタイムの確認 (PowerShell版のみ) |
-| 5 | ユーザーデータの完全リセット (キャッシュ・一時ファイル削除) |
-| 6 | 設定ファイル (claude_desktop_config.json) の検証・修復 |
-| 7 | MCP設定の検証 (PowerShell版のみ) |
-| 8 | `--disable-gpu` オプションでの起動テスト |
+| 2 | インストール形式の検出 (MSIX / Squirrel / スタンドアロン) |
+| 3 | CoworkVMService競合の検出と除去 |
+| 4 | 旧MSIXパッケージの競合クリーンアップ (PowerShell版のみ) |
+| 5 | 旧Squirrelインストールのクリーンアップ |
+| 6 | Visual C++ / WebView2 ランタイムの確認 |
+| 7 | ユーザーデータの完全リセット (キャッシュ・一時ファイル削除) |
+| 8 | 設定ファイル (claude_desktop_config.json) の検証・修復 / MCP設定の検証 |
+| 9 | 起動テスト (MSIX版: shell:AppsFolder経由 / 旧版: --disable-gpu) |
 
 ## よくある原因
 
 | 原因 | 症状 | 解決策 |
 |------|------|--------|
+| CoworkVMService競合 | インストール成功するが起動しない | スクリプトが自動検出・除去 |
+| 旧MSIXパッケージ残留 | HRESULT 0x80073CFA エラー | スクリプトが旧パッケージを削除 |
+| 旧Squirrelインストール残留 | MSIX版とSquirrel版が競合 | スクリプトが旧版をアンインストール |
 | ユーザーデータの破損 | 起動直後に "failed to Launch" | スクリプトが自動リセット |
 | 設定ファイルの破損 | 起動直後にエラーダイアログ | スクリプトが自動修復 |
 | MCP設定の問題 | 起動中にハング or エラー | MCP設定を無効化して確認 |
@@ -44,13 +50,26 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ## スクリプト実行後もエラーが続く場合
 
 1. **再インストール**: https://claude.ai/download からダウンロードして再インストール
-2. **完全リセット**: `%APPDATA%\Claude` フォルダを削除してから再インストール
-3. **Visual C++ Redistributable**: https://aka.ms/vs/17/release/vc_redist.x64.exe をインストール
-4. **Windows Update**: 最新の状態に更新
+2. **MSIX版の場合 - 強制再インストール**:
+   ```powershell
+   Get-AppxPackage 'Claude' | Remove-AppxPackage
+   ```
+   その後、https://claude.ai/download から再インストール
+3. **CoworkVMServiceの手動削除** (管理者権限のPowerShellで):
+   ```powershell
+   sc.exe stop CoworkVMService
+   sc.exe config CoworkVMService start= disabled
+   sc.exe delete CoworkVMService
+   ```
+4. **完全リセット**: `%APPDATA%\Claude` フォルダを削除してから再インストール
+5. **Visual C++ Redistributable**: https://aka.ms/vs/17/release/vc_redist.x64.exe をインストール
+6. **Windows Update**: 最新の状態に更新
 
 ## 手動での修正方法
 
 1. タスクマネージャーでClaude関連プロセスを全て終了
-2. `%APPDATA%\Claude` フォルダ内のファイルを削除（claude_desktop_config.jsonは残す）
-3. `claude_desktop_config.json` の内容を `{}` に置き換えて保存
-4. Claude Desktopを再起動
+2. 管理者権限のコマンドプロンプトで `sc.exe query CoworkVMService` を実行し、存在する場合は `sc.exe delete CoworkVMService` で削除
+3. MSIX版の場合: `Get-AppxPackage 'Claude' | Remove-AppxPackage` でアンインストール後、再インストール
+4. `%APPDATA%\Claude` フォルダ内のファイルを削除（claude_desktop_config.jsonは残す）
+5. `claude_desktop_config.json` の内容を `{}` に置き換えて保存
+6. Claude Desktopを再起動

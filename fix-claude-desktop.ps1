@@ -5,12 +5,14 @@
 .DESCRIPTION
     "Claude Desktop failed to Launch" エラーを修正します。
     - プロセス完全終了
+    - MSIX/Squirrel両インストール形式の検出と整合性チェック
+    - CoworkVMService競合の検出と除去
+    - 旧インストール残留のクリーンアップ
     - ユーザーデータの完全リセット
     - 設定ファイルの検証・修復
     - Visual C++ ランタイム確認
     - WebView2ランタイム確認
     - キャッシュ・一時ファイルのクリア
-    - アプリ整合性チェック
     - ログの確認
 #>
 
@@ -27,11 +29,17 @@ $configDir = Join-Path $env:APPDATA "Claude"
 $configFile = Join-Path $configDir "claude_desktop_config.json"
 $localAppData = $env:LOCALAPPDATA
 $issuesFound = @()
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Host "  [情報] 管理者権限なしで実行中。一部の修復は制限されます。" -ForegroundColor Yellow
+    Write-Host ""
+}
 
 # ============================================================
 # Step 1: Claude関連プロセスの完全終了
 # ============================================================
-Write-Host "[Step 1/8] Claude関連プロセスを完全終了..." -ForegroundColor Yellow
+Write-Host "[Step 1/10] Claude関連プロセスを完全終了..." -ForegroundColor Yellow
 
 $claudeProcesses = @("Claude", "claude", "Claude Desktop")
 foreach ($procName in $claudeProcesses) {
@@ -48,64 +56,124 @@ Write-Host "  完了" -ForegroundColor Green
 Write-Host ""
 
 # ============================================================
-# Step 2: インストール状態の確認
+# Step 2: インストール形式の検出 (MSIX / Squirrel)
 # ============================================================
-Write-Host "[Step 2/8] インストール状態を確認..." -ForegroundColor Yellow
+Write-Host "[Step 2/10] インストール形式を検出..." -ForegroundColor Yellow
 
-# インストールパスの検出
-$possiblePaths = @(
-    (Join-Path $localAppData "Programs\claude\Claude.exe"),
-    (Join-Path $localAppData "Programs\Claude\Claude.exe"),
-    (Join-Path $localAppData "Claude\Claude.exe"),
-    (Join-Path $env:ProgramFiles "Claude\Claude.exe"),
-    (Join-Path ${env:ProgramFiles(x86)} "Claude\Claude.exe")
-)
-
+$installType = "unknown"
 $claudeExe = $null
-foreach ($p in $possiblePaths) {
-    if (Test-Path $p) {
-        $claudeExe = $p
-        break
+$msixPackage = $null
+
+# MSIX版の検出
+try {
+    $msixPackage = Get-AppxPackage -Name "Claude" -ErrorAction SilentlyContinue |
+        Where-Object { $_.PackageFamilyName -like "Claude_*" } |
+        Sort-Object -Property Version -Descending |
+        Select-Object -First 1
+
+    if (-not $msixPackage) {
+        $msixPackage = Get-AppxPackage -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "Claude" -or $_.PackageFamilyName -like "Claude_*" } |
+            Sort-Object -Property Version -Descending |
+            Select-Object -First 1
     }
+} catch {
+    Write-Host "  AppxPackage確認中にエラー: $_" -ForegroundColor Gray
 }
 
-# ショートカットからパスを検出
-if (-not $claudeExe) {
-    $shortcuts = @(
-        (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Claude\Claude.lnk"),
-        (Join-Path ([Environment]::GetFolderPath("Desktop")) "Claude.lnk"),
-        (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Claude.lnk")
-    )
-    foreach ($lnk in $shortcuts) {
-        if (Test-Path $lnk) {
-            try {
-                $shell = New-Object -ComObject WScript.Shell
-                $shortcut = $shell.CreateShortcut($lnk)
-                if (Test-Path $shortcut.TargetPath) {
-                    $claudeExe = $shortcut.TargetPath
-                    break
-                }
-            } catch {}
+if ($msixPackage) {
+    $installType = "msix"
+    Write-Host "  インストール形式: MSIX (Windows App)" -ForegroundColor Green
+    Write-Host "  パッケージ名: $($msixPackage.PackageFullName)" -ForegroundColor Gray
+    Write-Host "  バージョン: $($msixPackage.Version)" -ForegroundColor Gray
+    Write-Host "  インストール先: $($msixPackage.InstallLocation)" -ForegroundColor Gray
+    Write-Host "  ステータス: $($msixPackage.Status)" -ForegroundColor Gray
+
+    if ($msixPackage.InstallLocation) {
+        $msixExe = Join-Path $msixPackage.InstallLocation "Claude.exe"
+        if (Test-Path $msixExe) {
+            $claudeExe = $msixExe
         }
     }
 }
 
-if ($claudeExe) {
-    $fileInfo = Get-Item $claudeExe
-    Write-Host "  実行ファイル: $claudeExe" -ForegroundColor Green
-    Write-Host "  バージョン: $($fileInfo.VersionInfo.FileVersion)" -ForegroundColor Gray
-    Write-Host "  サイズ: $([math]::Round($fileInfo.Length / 1MB, 1)) MB" -ForegroundColor Gray
-    Write-Host "  更新日: $($fileInfo.LastWriteTime)" -ForegroundColor Gray
+# Squirrel版の検出
+$squirrelDir = Join-Path $localAppData "AnthropicClaude"
+$squirrelExe = Join-Path $squirrelDir "claude.exe"
+$hasSquirrel = Test-Path $squirrelDir
 
-    # アプリのresourcesフォルダ確認
+if ($hasSquirrel) {
+    if ($installType -eq "msix") {
+        Write-Host "  [警告] 旧Squirrelインストールも残存: $squirrelDir" -ForegroundColor Yellow
+        $issuesFound += "旧Squirrelインストール残留"
+    } else {
+        $installType = "squirrel"
+        Write-Host "  インストール形式: Squirrel (旧形式)" -ForegroundColor Yellow
+        if (Test-Path $squirrelExe) {
+            $claudeExe = $squirrelExe
+            $fileInfo = Get-Item $claudeExe
+            Write-Host "  実行ファイル: $claudeExe" -ForegroundColor Green
+            Write-Host "  バージョン: $($fileInfo.VersionInfo.FileVersion)" -ForegroundColor Gray
+        }
+    }
+}
+
+# 従来パスの検索 (MSIXでもSquirrelでもない場合)
+if ($installType -eq "unknown") {
+    $possiblePaths = @(
+        (Join-Path $localAppData "Programs\claude\Claude.exe"),
+        (Join-Path $localAppData "Programs\Claude\Claude.exe"),
+        (Join-Path $localAppData "Claude\Claude.exe"),
+        (Join-Path $env:ProgramFiles "Claude\Claude.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Claude\Claude.exe")
+    )
+
+    foreach ($p in $possiblePaths) {
+        if (Test-Path $p) {
+            $claudeExe = $p
+            $installType = "standalone"
+            break
+        }
+    }
+
+    # ショートカットからパスを検出
+    if (-not $claudeExe) {
+        $shortcuts = @(
+            (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Claude\Claude.lnk"),
+            (Join-Path ([Environment]::GetFolderPath("Desktop")) "Claude.lnk"),
+            (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Claude.lnk")
+        )
+        foreach ($lnk in $shortcuts) {
+            if (Test-Path $lnk) {
+                try {
+                    $shell = New-Object -ComObject WScript.Shell
+                    $shortcut = $shell.CreateShortcut($lnk)
+                    if (Test-Path $shortcut.TargetPath) {
+                        $claudeExe = $shortcut.TargetPath
+                        $installType = "standalone"
+                        break
+                    }
+                } catch {}
+            }
+        }
+    }
+
+    if ($installType -eq "unknown") {
+        Write-Host "  [問題] Claude Desktopのインストールが見つかりません" -ForegroundColor Red
+        $issuesFound += "Claude Desktopが見つからない"
+    } else {
+        Write-Host "  インストール形式: スタンドアロン" -ForegroundColor Green
+        Write-Host "  実行ファイル: $claudeExe" -ForegroundColor Green
+    }
+}
+
+# アプリ整合性チェック (MSIX以外)
+if ($claudeExe -and $installType -ne "msix") {
     $appDir = Split-Path $claudeExe
     $resourcesDir = Join-Path $appDir "resources"
     $appAsar = Join-Path $resourcesDir "app.asar"
 
-    if (-not (Test-Path $appAsar)) {
-        Write-Host "  [問題] app.asarが見つかりません。インストールが破損しています。" -ForegroundColor Red
-        $issuesFound += "app.asar missing - インストール破損"
-    } else {
+    if (Test-Path $appAsar) {
         $asarSize = (Get-Item $appAsar).Length
         if ($asarSize -lt 1MB) {
             Write-Host "  [問題] app.asarのサイズが異常に小さい ($([math]::Round($asarSize / 1KB)) KB)" -ForegroundColor Red
@@ -113,17 +181,157 @@ if ($claudeExe) {
         } else {
             Write-Host "  app.asar: OK ($([math]::Round($asarSize / 1MB, 1)) MB)" -ForegroundColor Green
         }
+    } elseif ($installType -eq "squirrel") {
+        Write-Host "  [問題] app.asarが見つかりません。インストールが破損しています。" -ForegroundColor Red
+        $issuesFound += "app.asar missing - インストール破損"
     }
-} else {
-    Write-Host "  [問題] Claude Desktopの実行ファイルが見つかりません" -ForegroundColor Red
-    $issuesFound += "Claude Desktop実行ファイルが見つからない"
 }
 Write-Host ""
 
 # ============================================================
-# Step 3: Visual C++ ランタイムの確認
+# Step 3: CoworkVMService 競合の検出と除去
 # ============================================================
-Write-Host "[Step 3/8] Visual C++ ランタイムを確認..." -ForegroundColor Yellow
+Write-Host "[Step 3/10] CoworkVMService 競合を確認..." -ForegroundColor Yellow
+
+$coworkService = Get-Service -Name "CoworkVMService" -ErrorAction SilentlyContinue
+if ($coworkService) {
+    Write-Host "  [問題] CoworkVMService が検出されました (状態: $($coworkService.Status))" -ForegroundColor Red
+    Write-Host "  このサービスはClaude Desktopの起動と競合することがあります。" -ForegroundColor Yellow
+    $issuesFound += "CoworkVMService 競合"
+
+    if ($isAdmin) {
+        Write-Host "  CoworkVMServiceを停止・無効化しています..." -ForegroundColor Yellow
+        try {
+            if ($coworkService.Status -eq "Running") {
+                Stop-Service -Name "CoworkVMService" -Force -ErrorAction Stop
+                Write-Host "  サービスを停止しました" -ForegroundColor Green
+            }
+            Set-Service -Name "CoworkVMService" -StartupType Disabled -ErrorAction Stop
+            Write-Host "  サービスを無効化しました" -ForegroundColor Green
+
+            # サービスの削除を試行
+            $scResult = & sc.exe delete "CoworkVMService" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  サービスを削除しました" -ForegroundColor Green
+            } else {
+                Write-Host "  サービスの削除に失敗 (再起動後に削除されます): $scResult" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "  サービスの停止/無効化に失敗: $_" -ForegroundColor Red
+            Write-Host "  手動で対処してください:" -ForegroundColor Yellow
+            Write-Host "    sc.exe stop CoworkVMService" -ForegroundColor Gray
+            Write-Host "    sc.exe config CoworkVMService start= disabled" -ForegroundColor Gray
+            Write-Host "    sc.exe delete CoworkVMService" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  [要管理者権限] サービスの除去には管理者権限が必要です。" -ForegroundColor Yellow
+        Write-Host "  管理者権限でPowerShellを起動し、以下を実行してください:" -ForegroundColor Yellow
+        Write-Host "    sc.exe stop CoworkVMService" -ForegroundColor Gray
+        Write-Host "    sc.exe config CoworkVMService start= disabled" -ForegroundColor Gray
+        Write-Host "    sc.exe delete CoworkVMService" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "  CoworkVMService なし - OK" -ForegroundColor Green
+}
+Write-Host ""
+
+# ============================================================
+# Step 4: 旧MSIXパッケージの競合クリーンアップ
+# ============================================================
+Write-Host "[Step 4/10] 旧MSIXパッケージの競合を確認..." -ForegroundColor Yellow
+
+try {
+    $allClaudePackages = Get-AppxPackage -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq "Claude" -or $_.PackageFamilyName -like "Claude_*" }
+
+    if ($allClaudePackages -and $allClaudePackages.Count -gt 1) {
+        Write-Host "  [問題] 複数のClaudeパッケージが検出されました ($($allClaudePackages.Count)個)" -ForegroundColor Yellow
+        $issuesFound += "複数のMSIXパッケージが競合"
+
+        # 最新バージョン以外を削除
+        $latest = $allClaudePackages | Sort-Object -Property Version -Descending | Select-Object -First 1
+        $old = $allClaudePackages | Where-Object { $_.PackageFullName -ne $latest.PackageFullName }
+
+        foreach ($pkg in $old) {
+            Write-Host "  旧パッケージを削除: $($pkg.PackageFullName)" -ForegroundColor Yellow
+            try {
+                Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
+                Write-Host "  削除成功" -ForegroundColor Green
+            } catch {
+                Write-Host "  削除失敗 (HRESULT: $($_.Exception.HResult)): $_" -ForegroundColor Red
+                Write-Host "  手動削除: Get-AppxPackage '$($pkg.Name)' | Remove-AppxPackage" -ForegroundColor Gray
+
+                # ForceUpdateFromAnyVersion での再インストールを提案
+                Write-Host "  または再インストール時に強制上書き: " -ForegroundColor Gray
+                Write-Host "    Add-AppxPackage -Path <msix-path> -ForceUpdateFromAnyVersion" -ForegroundColor Gray
+            }
+        }
+    } elseif ($allClaudePackages) {
+        Write-Host "  MSIXパッケージ: 1個 (正常)" -ForegroundColor Green
+    } else {
+        Write-Host "  MSIXパッケージなし" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  MSIXパッケージの確認中にエラー: $_" -ForegroundColor Gray
+}
+Write-Host ""
+
+# ============================================================
+# Step 5: 旧Squirrelインストールのクリーンアップ
+# ============================================================
+Write-Host "[Step 5/10] 旧Squirrelインストールのクリーンアップ..." -ForegroundColor Yellow
+
+if ($hasSquirrel -and $installType -eq "msix") {
+    Write-Host "  MSIX版がインストール済みのため、旧Squirrelインストールを削除します。" -ForegroundColor Yellow
+    Write-Host "  対象: $squirrelDir" -ForegroundColor Gray
+
+    # Squirrelのアンインストールを試行
+    $squirrelUpdate = Join-Path $squirrelDir "Update.exe"
+    if (Test-Path $squirrelUpdate) {
+        Write-Host "  Squirrelアンインストーラーを実行中..." -ForegroundColor Gray
+        try {
+            Start-Process -FilePath $squirrelUpdate -ArgumentList "--uninstall" -Wait -NoNewWindow -ErrorAction Stop
+            Write-Host "  Squirrelアンインストール完了" -ForegroundColor Green
+        } catch {
+            Write-Host "  Squirrelアンインストーラーの実行に失敗: $_" -ForegroundColor Yellow
+        }
+    }
+
+    # 残留フォルダの削除
+    if (Test-Path $squirrelDir) {
+        try {
+            Remove-Item -Path $squirrelDir -Recurse -Force -ErrorAction Stop
+            Write-Host "  旧インストールフォルダを削除しました" -ForegroundColor Green
+        } catch {
+            Write-Host "  フォルダ削除に失敗 (一部ファイルがロック中の可能性): $_" -ForegroundColor Yellow
+            Write-Host "  手動削除: Remove-Item -Recurse -Force '$squirrelDir'" -ForegroundColor Gray
+        }
+    }
+
+    # SquirrelTemp のクリーンアップ
+    $squirrelTemp = Join-Path $localAppData "SquirrelTemp"
+    if (Test-Path $squirrelTemp) {
+        # Claudeに関連するファイルのみ削除（他のSquirrelアプリに影響しないよう注意）
+        $squirrelLog = Join-Path $squirrelTemp "Squirrel-Install.log"
+        if (Test-Path $squirrelLog) {
+            $logContent = Get-Content $squirrelLog -Raw -ErrorAction SilentlyContinue
+            if ($logContent -match "AnthropicClaude") {
+                Remove-Item $squirrelLog -Force -ErrorAction SilentlyContinue
+                Write-Host "  Squirrelインストールログを削除" -ForegroundColor Gray
+            }
+        }
+    }
+} elseif ($hasSquirrel) {
+    Write-Host "  Squirrelインストール検出 (現行バージョン)" -ForegroundColor Gray
+} else {
+    Write-Host "  旧Squirrelインストールなし - OK" -ForegroundColor Green
+}
+Write-Host ""
+
+# ============================================================
+# Step 6: Visual C++ ランタイムの確認
+# ============================================================
+Write-Host "[Step 6/10] Visual C++ ランタイムを確認..." -ForegroundColor Yellow
 
 $vcInstalled = $false
 $vcPaths = @(
@@ -139,7 +347,6 @@ foreach ($regPath in $vcPaths) {
     }
 }
 if (-not $vcInstalled) {
-    # DLLの直接チェック
     $vcruntime = Join-Path $env:SystemRoot "System32\vcruntime140.dll"
     if (Test-Path $vcruntime) {
         Write-Host "  Visual C++ ランタイムDLL: 存在 (vcruntime140.dll)" -ForegroundColor Green
@@ -153,9 +360,9 @@ if (-not $vcInstalled) {
 Write-Host ""
 
 # ============================================================
-# Step 4: WebView2 ランタイムの確認
+# Step 7: WebView2 ランタイムの確認
 # ============================================================
-Write-Host "[Step 4/8] WebView2 ランタイムを確認..." -ForegroundColor Yellow
+Write-Host "[Step 7/10] WebView2 ランタイムを確認..." -ForegroundColor Yellow
 
 $webview2Installed = $false
 $webview2Paths = @(
@@ -177,9 +384,9 @@ if (-not $webview2Installed) {
 Write-Host ""
 
 # ============================================================
-# Step 5: ユーザーデータの完全リセット
+# Step 8: ユーザーデータの完全リセット
 # ============================================================
-Write-Host "[Step 5/8] ユーザーデータをリセット..." -ForegroundColor Yellow
+Write-Host "[Step 8/10] ユーザーデータをリセット..." -ForegroundColor Yellow
 
 if (Test-Path $configDir) {
     # 設定ファイルのバックアップ
@@ -227,12 +434,30 @@ if (Test-Path $configDir) {
 } else {
     Write-Host "  設定ディレクトリなし。スキップ。" -ForegroundColor Gray
 }
+
+# MSIX版のローカルキャッシュもクリア
+if ($installType -eq "msix" -and $msixPackage) {
+    $msixLocalCache = Join-Path $localAppData "Packages" $msixPackage.PackageFamilyName "LocalCache"
+    if (Test-Path $msixLocalCache) {
+        Write-Host "  MSIXローカルキャッシュをクリア: $msixLocalCache" -ForegroundColor Gray
+        Get-ChildItem $msixLocalCache -Recurse -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  MSIXキャッシュクリア完了" -ForegroundColor Green
+    }
+
+    $msixTempState = Join-Path $localAppData "Packages" $msixPackage.PackageFamilyName "TempState"
+    if (Test-Path $msixTempState) {
+        Get-ChildItem $msixTempState -Recurse -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  MSIX TempStateクリア完了" -ForegroundColor Green
+    }
+}
 Write-Host ""
 
 # ============================================================
-# Step 6: 設定ファイルの検証・修復
+# Step 9: 設定ファイルの検証・修復
 # ============================================================
-Write-Host "[Step 6/8] 設定ファイルを検証・修復..." -ForegroundColor Yellow
+Write-Host "[Step 9/10] 設定ファイルを検証・修復..." -ForegroundColor Yellow
 
 if (-not (Test-Path $configDir)) {
     New-Item -ItemType Directory -Path $configDir -Force | Out-Null
@@ -287,10 +512,11 @@ if (-not (Test-Path $configFile)) {
 Write-Host ""
 
 # ============================================================
-# Step 7: Windowsイベントログの確認
+# Step 10: 修復後の起動テスト
 # ============================================================
-Write-Host "[Step 7/8] Windowsイベントログからエラーを検索..." -ForegroundColor Yellow
+Write-Host "[Step 10/10] 修復後の起動テスト..." -ForegroundColor Yellow
 
+# Windowsイベントログの確認
 try {
     $events = Get-WinEvent -LogName Application -MaxEvents 50 -ErrorAction SilentlyContinue |
         Where-Object {
@@ -310,17 +536,32 @@ try {
 } catch {
     Write-Host "  イベントログの読み取りに失敗: $_" -ForegroundColor Gray
 }
-Write-Host ""
 
-# ============================================================
-# Step 8: 修復後の起動テスト
-# ============================================================
-Write-Host "[Step 8/8] 修復後の起動テスト..." -ForegroundColor Yellow
+# 起動テスト
+if ($installType -eq "msix" -and $msixPackage) {
+    # MSIX版はshell:AppsFolderから起動
+    $appId = "$($msixPackage.PackageFamilyName)!Claude"
+    Write-Host "  MSIX版Claude Desktopを起動しています..." -ForegroundColor Gray
+    Write-Host "  起動コマンド: explorer.exe shell:AppsFolder\$appId" -ForegroundColor Gray
+    Start-Process "explorer.exe" -ArgumentList "shell:AppsFolder\$appId"
+    Start-Sleep -Seconds 8
 
-if ($claudeExe) {
-    Write-Host "  Claude Desktopを起動しています..." -ForegroundColor Gray
-
-    # まず --disable-gpu で試行（GPU関連のクラッシュを回避）
+    $proc = Get-Process -Name "Claude" -ErrorAction SilentlyContinue
+    if ($proc) {
+        Write-Host "  起動成功！プロセスを確認しました。" -ForegroundColor Green
+    } else {
+        Write-Host "  プロセスが検出されません。起動に時間がかかっている可能性があります。" -ForegroundColor Yellow
+        Start-Sleep -Seconds 5
+        $proc = Get-Process -Name "Claude" -ErrorAction SilentlyContinue
+        if ($proc) {
+            Write-Host "  起動成功！(遅延起動)" -ForegroundColor Green
+        } else {
+            Write-Host "  起動に失敗しました" -ForegroundColor Red
+            $issuesFound += "修復後も起動失敗"
+        }
+    }
+} elseif ($claudeExe) {
+    Write-Host "  Claude Desktopを起動しています (--disable-gpu)..." -ForegroundColor Gray
     Start-Process $claudeExe -ArgumentList "--disable-gpu"
     Start-Sleep -Seconds 8
 
@@ -350,6 +591,9 @@ Write-Host " 診断・修復結果" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
+Write-Host "インストール形式: $installType" -ForegroundColor White
+Write-Host ""
+
 if ($issuesFound.Count -eq 0) {
     Write-Host "  問題は検出されませんでした。" -ForegroundColor Green
     Write-Host "  キャッシュとユーザーデータをリセットしました。" -ForegroundColor Green
@@ -363,18 +607,37 @@ if ($issuesFound.Count -eq 0) {
 Write-Host ""
 Write-Host "実行された修復:" -ForegroundColor White
 Write-Host "  - Claude関連プロセスの完全終了"
+Write-Host "  - インストール形式の検出と整合性チェック"
+if ($coworkService) {
+    Write-Host "  - CoworkVMService競合の対処"
+}
+if ($hasSquirrel -and $installType -eq "msix") {
+    Write-Host "  - 旧Squirrelインストールのクリーンアップ"
+}
 Write-Host "  - キャッシュ・一時ファイルの完全削除"
 Write-Host "  - ユーザーデータのリセット (設定ファイルはバックアップ済み)"
 Write-Host "  - 設定ファイルの検証"
-Write-Host "  - --disable-gpu オプションで起動テスト"
+if ($installType -eq "msix") {
+    Write-Host "  - MSIX経由での起動テスト"
+} else {
+    Write-Host "  - --disable-gpu オプションで起動テスト"
+}
 
 Write-Host ""
 Write-Host "まだ起動しない場合の追加対策:" -ForegroundColor Yellow
 Write-Host "  1. Claude Desktopを再インストール:" -ForegroundColor White
 Write-Host "     https://claude.ai/download" -ForegroundColor Gray
-Write-Host "  2. 完全リセット (全設定削除):" -ForegroundColor White
-Write-Host "     Remove-Item -Recurse -Force '$configDir'" -ForegroundColor Gray
-Write-Host "     その後、再インストール" -ForegroundColor Gray
+if ($installType -eq "msix") {
+    Write-Host "  2. MSIXパッケージを強制再インストール:" -ForegroundColor White
+    Write-Host "     Get-AppxPackage 'Claude' | Remove-AppxPackage" -ForegroundColor Gray
+    Write-Host "     その後、https://claude.ai/download から再インストール" -ForegroundColor Gray
+    Write-Host "  3. CoworkVMServiceが存在する場合は管理者権限で削除:" -ForegroundColor White
+    Write-Host "     sc.exe delete CoworkVMService" -ForegroundColor Gray
+} else {
+    Write-Host "  2. 完全リセット (全設定削除):" -ForegroundColor White
+    Write-Host "     Remove-Item -Recurse -Force '$configDir'" -ForegroundColor Gray
+    Write-Host "     その後、再インストール" -ForegroundColor Gray
+}
 Write-Host "  3. Visual C++ Redistributableをインストール:" -ForegroundColor White
 Write-Host "     https://aka.ms/vs/17/release/vc_redist.x64.exe" -ForegroundColor Gray
 Write-Host "  4. Windows Updateを確認し、最新の状態にする" -ForegroundColor White
