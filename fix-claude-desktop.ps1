@@ -195,8 +195,16 @@ Write-Host "[Step 3/12] CoworkVMService 競合を確認..." -ForegroundColor Yel
 
 # CoworkVMService はClaude MSIX パッケージ内の cowork-svc.exe が登録するサービス。
 # 再インストール時に旧サービスが残留すると、新パッケージのインストール/起動が失敗する。
-# MSIX パッケージ型サービス (type WIN32_PACKAGED_PROCESS) のため sc.exe delete では
-# 削除できず、レジストリからの直接削除が必要。
+#
+# 問題の流れ:
+#   1. Claude MSIX インストール → CoworkVMService が自動登録される
+#   2. Claude Setup で更新時 → CoworkVMService が競合として検出される
+#   3. 管理者権限でも "could not open CoworkVMService: Access is denied" で削除失敗
+#   4. 旧パッケージ削除失敗 (0x80073CFA) → 新パッケージインストール失敗 (0x80073CF6)
+#
+# 解決策: MSIX パッケージを先に削除してからサービスのレジストリ残留を除去する。
+# CoworkVMService は MSIX パッケージに所有されているため、パッケージ削除で
+# サービスも一緒に削除される。パッケージ削除後もレジストリが残る場合は手動削除する。
 
 $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService"
 $coworkService = Get-Service -Name "CoworkVMService" -ErrorAction SilentlyContinue
@@ -216,39 +224,111 @@ if ($coworkService -or $coworkRegExists) {
         }
     }
 
-    Write-Host "  このサービスはClaude (cowork-svc.exe) の残留サービスです。" -ForegroundColor Yellow
-    Write-Host "  再インストール時に競合し、起動失敗の原因になります。" -ForegroundColor Yellow
+    Write-Host "  このサービスはClaude MSIXパッケージが所有するサービスです。" -ForegroundColor Yellow
+    Write-Host "  更新インストール時に競合し、HRESULT 0x80073CF6 エラーの原因になります。" -ForegroundColor Yellow
     $issuesFound += "CoworkVMService 残留 (Claude cowork-svc.exe)"
 
     if ($isAdmin) {
-        # まずサービスの停止を試行
+        # Step 3a: まずサービスの停止を試行
         if ($coworkService -and $coworkService.Status -eq "Running") {
             try {
                 Stop-Service -Name "CoworkVMService" -Force -ErrorAction Stop
                 Write-Host "  サービスを停止しました" -ForegroundColor Green
             } catch {
-                # sc.exe でも試行
                 & sc.exe stop "CoworkVMService" 2>&1 | Out-Null
                 Write-Host "  サービス停止を試行しました" -ForegroundColor Yellow
             }
         }
 
-        # MSIX パッケージ型サービスは sc.exe delete では削除できないため
-        # レジストリから直接削除する
-        if ($coworkRegExists) {
-            try {
-                Remove-Item -Path $svcRegPath -Recurse -Force -ErrorAction Stop
-                Write-Host "  レジストリからサービスを削除しました" -ForegroundColor Green
-            } catch {
-                Write-Host "  レジストリ削除に失敗: $_" -ForegroundColor Red
-                Write-Host "  手動で削除してください:" -ForegroundColor Yellow
-                Write-Host "    Remove-Item -Path '$svcRegPath' -Recurse -Force" -ForegroundColor Gray
+        # Step 3b: CoworkVMService を所有している MSIX パッケージを先に削除する
+        # サービスが MSIX に所有されているため、パッケージ削除でサービスも解放される
+        Write-Host "  CoworkVMService を所有するMSIXパッケージを削除します..." -ForegroundColor Yellow
+        $coworkRemoved = $false
+        try {
+            $claudePackages = Get-AppxPackage -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -eq "Claude" -or $_.PackageFamilyName -like "Claude_*" }
+            if ($claudePackages) {
+                foreach ($pkg in $claudePackages) {
+                    Write-Host "  パッケージ削除中: $($pkg.PackageFullName)" -ForegroundColor Gray
+                    try {
+                        Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
+                        Write-Host "  パッケージ削除成功: $($pkg.PackageFullName)" -ForegroundColor Green
+                        $coworkRemoved = $true
+                    } catch {
+                        Write-Host "  パッケージ削除失敗: $($_.Exception.Message)" -ForegroundColor Yellow
+                        # AllUsers でも試行
+                        try {
+                            Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop
+                            Write-Host "  AllUsersで削除成功" -ForegroundColor Green
+                            $coworkRemoved = $true
+                        } catch {
+                            Write-Host "  AllUsersでも削除失敗: $($_.Exception.Message)" -ForegroundColor Red
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-Host "  パッケージ一覧取得エラー: $_" -ForegroundColor Red
+        }
+
+        # Step 3c: パッケージ削除後、レジストリにサービスが残留していれば削除
+        Start-Sleep -Seconds 2
+        if (Test-Path $svcRegPath) {
+            Write-Host "  レジストリにサービスが残留。直接削除します..." -ForegroundColor Yellow
+
+            # sc.exe delete も試行（パッケージ削除後なら成功する可能性がある）
+            $scResult = & sc.exe delete "CoworkVMService" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  sc.exe delete で削除成功" -ForegroundColor Green
+            } else {
+                Write-Host "  sc.exe delete 失敗 ($scResult)。レジストリから直接削除..." -ForegroundColor Yellow
+                try {
+                    Remove-Item -Path $svcRegPath -Recurse -Force -ErrorAction Stop
+                    Write-Host "  レジストリからサービスを削除しました" -ForegroundColor Green
+                } catch {
+                    Write-Host "  レジストリ削除に失敗: $_" -ForegroundColor Red
+                    Write-Host "" -ForegroundColor Gray
+                    Write-Host "  === 手動対処が必要です ===" -ForegroundColor Red
+                    Write-Host "  1. PCを再起動してください" -ForegroundColor Yellow
+                    Write-Host "  2. 再起動後、管理者PowerShellで以下を実行:" -ForegroundColor Yellow
+                    Write-Host "     Remove-Item -Path '$svcRegPath' -Recurse -Force" -ForegroundColor Gray
+                    Write-Host "  3. その後 Claude Setup を実行" -ForegroundColor Yellow
+                }
+            }
+        } else {
+            Write-Host "  CoworkVMService のレジストリが正常に削除されました" -ForegroundColor Green
+        }
+
+        # Step 3d: 再起動推奨の判定
+        $svcStillExists = (Get-Service -Name "CoworkVMService" -ErrorAction SilentlyContinue) -or (Test-Path $svcRegPath)
+        if ($svcStillExists) {
+            Write-Host "" -ForegroundColor Gray
+            Write-Host "  [重要] CoworkVMService が完全に削除できませんでした。" -ForegroundColor Red
+            Write-Host "  PCを再起動してから、このスクリプトを再実行してください。" -ForegroundColor Yellow
+            Write-Host "  再起動によりサービスコントロールマネージャーのキャッシュがクリアされます。" -ForegroundColor Gray
+            $issuesFound += "CoworkVMService 削除不完全 - 要再起動"
+        } else {
+            Write-Host "  CoworkVMService を完全に除去しました" -ForegroundColor Green
+            if ($coworkRemoved) {
+                Write-Host "" -ForegroundColor Gray
+                Write-Host "  [注意] Claude MSIXパッケージも削除されました。" -ForegroundColor Yellow
+                Write-Host "  Claude Setup を実行して再インストールしてください。" -ForegroundColor Yellow
+                $issuesFound += "CoworkVMService 除去のためMSIXパッケージを削除済み - 要再インストール"
+                # パッケージが削除されたので msixPackage をリセット
+                $msixPackage = $null
+                $installType = "unknown"
             }
         }
     } else {
         Write-Host "  [要管理者権限] サービスの除去には管理者権限が必要です。" -ForegroundColor Yellow
-        Write-Host "  管理者権限でPowerShellを起動し、以下を実行してください:" -ForegroundColor Yellow
-        Write-Host "    Remove-Item -Path '$svcRegPath' -Recurse -Force" -ForegroundColor Gray
+        Write-Host "  管理者権限でこのスクリプトを再実行してください。" -ForegroundColor Yellow
+        Write-Host "" -ForegroundColor Gray
+        Write-Host "  手動対処手順:" -ForegroundColor Yellow
+        Write-Host "  1. 管理者権限でPowerShellを起動" -ForegroundColor White
+        Write-Host "  2. Get-AppxPackage 'Claude' | Remove-AppxPackage" -ForegroundColor Gray
+        Write-Host "  3. Remove-Item -Path '$svcRegPath' -Recurse -Force" -ForegroundColor Gray
+        Write-Host "  4. PCを再起動" -ForegroundColor White
+        Write-Host "  5. Claude Setup を実行して再インストール" -ForegroundColor White
     }
 } else {
     Write-Host "  CoworkVMService なし - OK" -ForegroundColor Green
@@ -778,8 +858,11 @@ if ($installType -eq "msix") {
     Write-Host "  2. MSIXパッケージを強制再インストール:" -ForegroundColor White
     Write-Host "     Get-AppxPackage 'Claude' | Remove-AppxPackage" -ForegroundColor Gray
     Write-Host "     その後、https://claude.ai/download から再インストール" -ForegroundColor Gray
-    Write-Host "  3. CoworkVMServiceが存在する場合は管理者権限で削除:" -ForegroundColor White
-    Write-Host "     sc.exe delete CoworkVMService" -ForegroundColor Gray
+    Write-Host "  3. CoworkVMService が原因の場合 (HRESULT 0x80073CF6):" -ForegroundColor White
+    Write-Host "     管理者PowerShellで以下を順に実行:" -ForegroundColor Gray
+    Write-Host "       Get-AppxPackage 'Claude' | Remove-AppxPackage" -ForegroundColor Gray
+    Write-Host "       Remove-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService' -Recurse -Force" -ForegroundColor Gray
+    Write-Host "       その後PCを再起動し、Claude Setup を実行" -ForegroundColor Gray
 } else {
     Write-Host "  2. 完全リセット (全設定削除):" -ForegroundColor White
     Write-Host "     Remove-Item -Recurse -Force '$configDir'" -ForegroundColor Gray

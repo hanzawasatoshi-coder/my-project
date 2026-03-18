@@ -70,30 +70,60 @@ if "%INSTALL_TYPE%"=="unknown" (
 echo.
 
 REM ============================================================
-REM Step 3: CoworkVMService 競合の確認
+REM Step 3: CoworkVMService 競合の確認と除去
 REM ============================================================
 echo [Step 3/11] CoworkVMService 競合を確認...
-REM CoworkVMService はClaude MSIX内の cowork-svc.exe の残留サービス。
-REM MSIXパッケージ型サービスのため sc.exe delete では削除不可。レジストリ削除が必要。
+REM CoworkVMService はClaude MSIXパッケージが所有するサービス。
+REM 更新インストール時に競合し HRESULT 0x80073CF6 エラーの原因になる。
+REM 解決策: MSIXパッケージを先に削除してからレジストリ残留を除去する。
 sc query CoworkVMService >nul 2>&1
 if not errorlevel 1 (
     echo   [問題] CoworkVMService が検出されました
-    echo   Claude (cowork-svc.exe) の残留サービスです。起動失敗の原因になります。
+    echo   Claude MSIXパッケージが所有するサービスです。
+    echo   更新インストール時に HRESULT 0x80073CF6 エラーの原因になります。
     echo.
     net session >nul 2>&1
     if not errorlevel 1 (
         echo   管理者権限を検出。自動対処します...
+        echo.
+        REM Step 3a: サービスの停止
         sc.exe stop CoworkVMService >nul 2>&1
-        REM レジストリから直接削除 (sc.exe deleteはMSIXパッケージ型サービスに使用不可)
-        reg delete "HKLM\SYSTEM\CurrentControlSet\Services\CoworkVMService" /f >nul 2>&1
+        REM Step 3b: CoworkVMService を所有するMSIXパッケージを先に削除
+        echo   CoworkVMService を所有するMSIXパッケージを削除します...
+        powershell -NoProfile -Command "Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ('  削除中: ' + $_.PackageFullName); try { Remove-AppxPackage -Package $_.PackageFullName -ErrorAction Stop; Write-Host '  削除成功' } catch { try { Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction Stop; Write-Host '  AllUsersで削除成功' } catch { Write-Host ('  削除失敗: ' + $_.Exception.Message) } } }" 2>nul
+        timeout /t 2 /nobreak >nul
+        REM Step 3c: パッケージ削除後にサービスのレジストリ残留を削除
+        sc query CoworkVMService >nul 2>&1
         if not errorlevel 1 (
-            echo   レジストリからサービスを削除しました
+            echo   パッケージ削除後もサービスが残留。レジストリから削除します...
+            sc.exe delete CoworkVMService >nul 2>&1
+            if not errorlevel 1 (
+                echo   sc.exe delete で削除成功
+            ) else (
+                reg delete "HKLM\SYSTEM\CurrentControlSet\Services\CoworkVMService" /f >nul 2>&1
+                if not errorlevel 1 (
+                    echo   レジストリからサービスを削除しました
+                ) else (
+                    echo   [重要] 削除に失敗しました
+                    echo   PCを再起動してから、このスクリプトを再実行してください
+                )
+            )
         ) else (
-            echo   削除に失敗。PowerShell版スクリプトの使用を推奨します
+            echo   CoworkVMService が正常に削除されました
         )
+        echo.
+        echo   [注意] Claude MSIXパッケージも削除されました。
+        echo   このスクリプト完了後、Claude Setup を実行して再インストールしてください。
     ) else (
-        echo   [要管理者権限] 管理者権限でPowerShellを起動し以下を実行:
-        echo     Remove-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService' -Recurse -Force
+        echo   [要管理者権限] サービスの除去には管理者権限が必要です。
+        echo   管理者権限でこのスクリプトを再実行してください。
+        echo.
+        echo   手動対処手順:
+        echo     1. 管理者権限でPowerShellを起動
+        echo     2. Get-AppxPackage 'Claude' ^| Remove-AppxPackage
+        echo     3. Remove-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService' -Recurse -Force
+        echo     4. PCを再起動
+        echo     5. Claude Setup を実行して再インストール
     )
 ) else (
     echo   CoworkVMService なし - OK
@@ -287,8 +317,11 @@ if "%INSTALL_TYPE%"=="msix" (
     echo   1. MSIXパッケージを強制再インストール:
     echo      PowerShellで: Get-AppxPackage 'Claude' ^| Remove-AppxPackage
     echo      その後、https://claude.ai/download から再インストール
-    echo   2. CoworkVMServiceが存在する場合は管理者権限で削除:
-    echo      sc.exe delete CoworkVMService
+    echo   2. CoworkVMService が原因の場合 (HRESULT 0x80073CF6):
+    echo      管理者PowerShellで以下を順に実行:
+    echo        Get-AppxPackage 'Claude' ^| Remove-AppxPackage
+    echo        Remove-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\CoworkVMService' -Recurse -Force
+    echo      その後PCを再起動し、Claude Setup を実行
 ) else (
     echo   1. 再インストール: https://claude.ai/download
     echo   2. 完全リセット: "%CONFIG_DIR%" フォルダを削除後に再インストール
