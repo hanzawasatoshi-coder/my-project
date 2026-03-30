@@ -967,7 +967,7 @@ if ($osVersion.Major -lt 10) {
         if ($osBuild -ge 22000) {
             Write-Host "  Windows 11 (ビルド $osBuild): 互換性OK" -ForegroundColor Green
         } else {
-            Write-Host "  Windows 10 ビルド $osBuild: 互換性OK" -ForegroundColor Green
+            Write-Host "  Windows 10 ビルド ${osBuild}: 互換性OK" -ForegroundColor Green
         }
     }
 }
