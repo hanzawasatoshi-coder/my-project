@@ -237,7 +237,7 @@ if exist "%SystemRoot%\System32\CoreMessaging.dll" (
 echo.
 
 REM ============================================================
-REM Step 8: Windows バージョン互換性チェック
+REM Step 8: Windows バージョン互換性チェック + CoreMessaging.dll自動修復
 REM ============================================================
 echo [Step 8/12] Windows バージョン互換性を確認...
 for /f "tokens=2 delims==" %%a in ('wmic os get BuildNumber /value 2^>nul ^| findstr BuildNumber') do set OS_BUILD=%%a
@@ -268,6 +268,42 @@ if defined OS_BUILD (
     )
 ) else (
     echo   ビルド番号の取得に失敗しました
+)
+
+REM CoreMessaging.dll クラッシュの自動検出
+echo   CoreMessaging.dll クラッシュ履歴を確認...
+powershell -NoProfile -Command "try { $crash = Get-WinEvent -LogName Application -MaxEvents 200 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'Claude' -and $_.Message -match 'CoreMessaging\.dll' } | Select-Object -First 1; if ($crash) { Write-Host '  [問題] CoreMessaging.dll クラッシュを検出' -ForegroundColor Red; exit 1 } else { Write-Host '  CoreMessaging.dll クラッシュ履歴なし' -ForegroundColor Green; exit 0 } } catch { exit 0 }" 2>nul
+if %errorlevel% equ 1 set COREMSG_CRASH=1
+
+REM CoreMessaging.dll クラッシュが検出された場合、Windows 8互換モードを自動設定
+if defined COREMSG_CRASH (
+    echo   Windows 8 互換モードを自動設定しています...
+    if "%INSTALL_TYPE%"=="msix" (
+        for /f "tokens=*" %%a in ('powershell -NoProfile -Command "(Get-AppxPackage -Name 'Claude' | Sort-Object Version -Descending | Select-Object -First 1).InstallLocation" 2^>nul') do (
+            if exist "%%a\Claude.exe" (
+                reg add "HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" /v "%%a\Claude.exe" /d "~ WIN8RTM" /f >nul 2>&1
+                echo   互換モード設定完了: %%a\Claude.exe
+            )
+        )
+    ) else if defined CLAUDE_EXE (
+        reg add "HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" /v "%CLAUDE_EXE%" /d "~ WIN8RTM" /f >nul 2>&1
+        echo   互換モード設定完了: %CLAUDE_EXE%
+    )
+
+    REM 管理者権限があればsfc/DISMも実行
+    net session >nul 2>&1
+    if not errorlevel 1 (
+        echo.
+        echo   管理者権限を検出。システムファイル修復を実行します...
+        echo   sfc /scannow を実行中 (数分かかります)...
+        sfc /scannow >nul 2>&1
+        echo   sfc 完了
+        echo   DISM /RestoreHealth を実行中 (数分かかります)...
+        DISM /Online /Cleanup-Image /RestoreHealth >nul 2>&1
+        echo   DISM 完了
+    ) else (
+        echo   [情報] sfc/DISM は管理者権限が必要です。管理者として再実行してください。
+    )
 )
 echo.
 
@@ -366,9 +402,68 @@ if "%INSTALL_TYPE%"=="msix" (
 )
 echo.
 
+REM 起動失敗時の追加リカバリ
+tasklist /fi "imagename eq Claude.exe" 2>nul | find "Claude.exe" >nul
+if errorlevel 1 (
+    echo.
+    echo ============================================
+    echo  起動に失敗しました。追加修復を試みます...
+    echo ============================================
+    echo.
+
+    REM Phase 1: 互換モード + --disable-gpu --no-sandbox で再試行 (非MSIX)
+    if not "%INSTALL_TYPE%"=="msix" if defined CLAUDE_EXE (
+        echo [追加修復] --disable-gpu --no-sandbox で再試行...
+        start "" "%CLAUDE_EXE%" --disable-gpu --no-sandbox
+        timeout /t 10 /nobreak >nul
+        tasklist /fi "imagename eq Claude.exe" 2>nul | find "Claude.exe" >nul
+        if not errorlevel 1 (
+            echo   起動成功！(GPU/サンドボックス無効モード)
+            goto :summary
+        )
+    )
+
+    echo.
+    echo   全ての自動修復が失敗しました。
+    echo   再インストールを推奨します。
+    echo.
+    if "%INSTALL_TYPE%"=="msix" (
+        echo   再インストール手順:
+        echo     1. 管理者PowerShellで: Get-AppxPackage 'Claude' ^| Remove-AppxPackage
+        echo     2. PCを再起動
+        echo     3. https://claude.ai/download から再インストール
+        echo.
+        set /p "DOREINSTALL=MSIXパッケージを削除して再インストール準備をしますか？ (y/N): "
+        if /i "%DOREINSTALL%"=="y" (
+            echo   MSIXパッケージを削除しています...
+            powershell -NoProfile -Command "Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue" 2>nul
+            echo   削除完了。
+            echo.
+            echo   次のステップ:
+            echo     1. PCを再起動してください
+            echo     2. ブラウザで https://claude.ai/download を開いてください
+            echo     3. ダウンロードしたインストーラーを実行してください
+            echo.
+            set /p "OPENURL=ダウンロードページをブラウザで開きますか？ (y/N): "
+            if /i "%OPENURL%"=="y" start "" "https://claude.ai/download"
+        )
+    ) else (
+        echo   再インストール手順:
+        echo     1. コントロールパネルからClaude Desktopをアンインストール
+        echo     2. %CONFIG_DIR% フォルダを削除
+        echo     3. PCを再起動
+        echo     4. https://claude.ai/download から再インストール
+        echo.
+        set /p "OPENURL=ダウンロードページをブラウザで開きますか？ (y/N): "
+        if /i "%OPENURL%"=="y" start "" "https://claude.ai/download"
+    )
+)
+
+:summary
 REM ============================================================
 REM 結果サマリー
 REM ============================================================
+echo.
 echo ============================================
 echo  修復完了！
 echo ============================================
@@ -384,6 +479,10 @@ echo   - 旧Squirrelインストールのクリーンアップ
 echo   - キャッシュ・一時ファイルの完全削除
 echo   - ユーザーデータのリセット
 echo   - 設定ファイルの検証
+if defined COREMSG_CRASH (
+    echo   - CoreMessaging.dll 互換モード設定
+    echo   - sfc/DISM システムファイル修復
+)
 echo   - 起動テスト
 echo.
 echo まだ起動しない場合:

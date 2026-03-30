@@ -35,6 +35,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | 10 | ユーザーデータの完全リセット (キャッシュ・一時ファイル削除) |
 | 11 | 設定ファイル (claude_desktop_config.json) の検証・修復 / MCP設定の検証 |
 | 12 | 起動テスト (MSIX版: shell:AppsFolder経由 / 旧版: --disable-gpu) |
+| 13 | 起動失敗時の段階的リカバリ (互換モード再試行 → MSIX再登録 → 再インストール案内) |
 
 ## よくある原因
 

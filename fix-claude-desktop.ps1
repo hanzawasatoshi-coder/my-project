@@ -1182,6 +1182,130 @@ if ($installType -eq "msix" -and $msixPackage) {
 } else {
     Write-Host "  実行ファイルが見つからないためスキップ" -ForegroundColor Red
 }
+
+# 起動失敗時の段階的リカバリ
+$launchFailed = $issuesFound -contains "修復後も起動失敗"
+if ($launchFailed) {
+    Write-Host "" -ForegroundColor Gray
+    Write-Host "  ========================================" -ForegroundColor Red
+    Write-Host "  起動に失敗しました。追加の修復を試みます..." -ForegroundColor Red
+    Write-Host "  ========================================" -ForegroundColor Red
+    Write-Host "" -ForegroundColor Gray
+
+    # リカバリ Phase 1: 互換モード未設定なら設定して再試行
+    if (-not $coreMsgCrashDetected) {
+        Write-Host "  [Phase 1] Windows 8 互換モードを設定して再試行..." -ForegroundColor Yellow
+        $compatRegPath = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
+        if (-not (Test-Path $compatRegPath)) {
+            New-Item -Path $compatRegPath -Force | Out-Null
+        }
+        if ($claudeExe) {
+            Set-ItemProperty -Path $compatRegPath -Name $claudeExe -Value "~ WIN8RTM" -ErrorAction SilentlyContinue
+            Write-Host "  互換モード設定完了" -ForegroundColor Green
+        }
+    }
+
+    # リカバリ Phase 2: --disable-gpu で再試行 (Squirrel/standalone)
+    if ($claudeExe -and $installType -ne "msix") {
+        Write-Host "  [Phase 2] --disable-gpu --no-sandbox で再試行..." -ForegroundColor Yellow
+        Get-Process -Name "Claude" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        Start-Process $claudeExe -ArgumentList "--disable-gpu", "--no-sandbox"
+        Start-Sleep -Seconds 10
+        $proc = Get-Process -Name "Claude" -ErrorAction SilentlyContinue
+        if ($proc) {
+            Write-Host "  起動成功！(--disable-gpu --no-sandbox)" -ForegroundColor Green
+            $issuesFound = $issuesFound | Where-Object { $_ -ne "修復後も起動失敗" }
+            $issuesFound += "GPUサンドボックス無効で起動成功 (根本対処が必要)"
+        }
+    }
+
+    # リカバリ Phase 3: MSIX再登録
+    if ($installType -eq "msix" -and $msixPackage) {
+        Write-Host "  [Phase 3] MSIXパッケージを再登録して再試行..." -ForegroundColor Yellow
+        Get-Process -Name "Claude" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $manifestPath = Join-Path $msixPackage.InstallLocation "AppxManifest.xml"
+        if (Test-Path $manifestPath) {
+            try {
+                Add-AppxPackage -Register $manifestPath -DisableDevelopmentMode -ErrorAction Stop
+                Write-Host "  再登録完了。起動を再試行..." -ForegroundColor Green
+                Start-Sleep -Seconds 2
+                $appId = "$($msixPackage.PackageFamilyName)!Claude"
+                Start-Process "explorer.exe" -ArgumentList "shell:AppsFolder\$appId"
+                Start-Sleep -Seconds 10
+                $proc = Get-Process -Name "Claude" -ErrorAction SilentlyContinue
+                if ($proc) {
+                    Write-Host "  再登録後の起動に成功！" -ForegroundColor Green
+                    $issuesFound = $issuesFound | Where-Object { $_ -ne "修復後も起動失敗" }
+                } else {
+                    Write-Host "  再登録後も起動失敗" -ForegroundColor Red
+                }
+            } catch {
+                Write-Host "  再登録に失敗: $_" -ForegroundColor Red
+            }
+        }
+    }
+
+    # リカバリ Phase 4: 再インストールの自動案内
+    $stillFailed = $issuesFound -contains "修復後も起動失敗"
+    if ($stillFailed) {
+        Write-Host "" -ForegroundColor Gray
+        Write-Host "  ========================================" -ForegroundColor Cyan
+        Write-Host "  全ての自動修復が失敗しました。" -ForegroundColor Red
+        Write-Host "  再インストールを推奨します。" -ForegroundColor Red
+        Write-Host "  ========================================" -ForegroundColor Cyan
+        Write-Host "" -ForegroundColor Gray
+
+        if ($installType -eq "msix") {
+            Write-Host "  再インストール手順:" -ForegroundColor Yellow
+            Write-Host "  1. 以下のコマンドで現在のパッケージを削除:" -ForegroundColor White
+            Write-Host "     Get-AppxPackage 'Claude' | Remove-AppxPackage" -ForegroundColor Gray
+            Write-Host "  2. PCを再起動" -ForegroundColor White
+            Write-Host "  3. https://claude.ai/download から再インストール" -ForegroundColor White
+            Write-Host "" -ForegroundColor Gray
+
+            $doReinstall = Read-Host "  今すぐMSIXパッケージを削除して再インストール準備をしますか？ (y/N)"
+            if ($doReinstall -eq "y" -or $doReinstall -eq "Y") {
+                Write-Host "  MSIXパッケージを削除しています..." -ForegroundColor Yellow
+                Get-Process -Name "Claude" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+                try {
+                    Get-AppxPackage -Name "Claude" -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction Stop
+                    Write-Host "  削除完了。" -ForegroundColor Green
+                    Write-Host "" -ForegroundColor Gray
+                    Write-Host "  次の手順:" -ForegroundColor Cyan
+                    Write-Host "  1. PCを再起動してください" -ForegroundColor White
+                    Write-Host "  2. ブラウザで https://claude.ai/download を開いてください" -ForegroundColor White
+                    Write-Host "  3. ダウンロードしたインストーラーを実行してください" -ForegroundColor White
+                    Write-Host "" -ForegroundColor Gray
+
+                    $openDownload = Read-Host "  ダウンロードページをブラウザで開きますか？ (y/N)"
+                    if ($openDownload -eq "y" -or $openDownload -eq "Y") {
+                        Start-Process "https://claude.ai/download"
+                        Write-Host "  ブラウザを開きました" -ForegroundColor Green
+                    }
+                } catch {
+                    Write-Host "  削除に失敗: $_" -ForegroundColor Red
+                    Write-Host "  手動で削除してください: Get-AppxPackage 'Claude' | Remove-AppxPackage" -ForegroundColor Yellow
+                }
+            }
+        } else {
+            Write-Host "  再インストール手順:" -ForegroundColor Yellow
+            Write-Host "  1. コントロールパネルからClaude Desktopをアンインストール" -ForegroundColor White
+            Write-Host "  2. %APPDATA%\Claude フォルダを削除" -ForegroundColor White
+            Write-Host "  3. PCを再起動" -ForegroundColor White
+            Write-Host "  4. https://claude.ai/download から再インストール" -ForegroundColor White
+            Write-Host "" -ForegroundColor Gray
+
+            $openDownload = Read-Host "  ダウンロードページをブラウザで開きますか？ (y/N)"
+            if ($openDownload -eq "y" -or $openDownload -eq "Y") {
+                Start-Process "https://claude.ai/download"
+                Write-Host "  ブラウザを開きました" -ForegroundColor Green
+            }
+        }
+    }
+}
 Write-Host ""
 
 # ============================================================
